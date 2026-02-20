@@ -45,6 +45,5 @@ func (f *Filter) Process(input string) ProcessResult {
 		}
 	}
 
-	result := f.rules.FilterContent(input)
-	return ProcessResult{Output: result.Content, Filtered: result.Filtered}
+	return ProcessResult{Output: input, Filtered: false}
 }

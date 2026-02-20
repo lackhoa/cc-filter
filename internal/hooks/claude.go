@@ -80,8 +80,7 @@ func (c *ClaudeHookProcessor) processPreToolUse(input map[string]interface{}) (s
 
 func (c *ClaudeHookProcessor) processUserPromptSubmit(input map[string]interface{}) (string, error) {
 	prompt, _ := input["prompt"].(string)
-	result := c.rules.FilterContent(prompt)
-	return result.Content, nil
+	return prompt, nil
 }
 
 func (c *ClaudeHookProcessor) shouldBlockTool(toolName string, toolInput map[string]interface{}) (bool, string) {
@@ -98,11 +97,6 @@ func (c *ClaudeHookProcessor) shouldBlockTool(toolName string, toolInput map[str
 					return true, "Pattern may expose sensitive files: " + pattern
 				}
 			}
-		}
-		
-	case "Grep", "Search":
-		if pattern, ok := toolInput["pattern"].(string); ok {
-			return c.rules.ShouldBlockSearch(pattern)
 		}
 		
 	case "Bash":

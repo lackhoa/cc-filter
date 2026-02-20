@@ -3,27 +3,13 @@ package rules
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Rules struct {
-	Patterns      []PatternRule `yaml:"patterns"`
-	FileBlocks    []string      `yaml:"file_blocks"`
-	SearchBlocks  []string      `yaml:"search_blocks"`
-	CommandBlocks []string      `yaml:"command_blocks"`
-
-	// compiled regex patterns
-	compiledPatterns      []*regexp.Regexp
-	compiledCommandBlocks []*regexp.Regexp
-}
-
-type PatternRule struct {
-	Name        string `yaml:"name"`
-	Regex       string `yaml:"regex"`
-	Replacement string `yaml:"replacement"`
+	FileBlocks []string `yaml:"file_blocks"`
 }
 
 func LoadRules() (*Rules, error) {
@@ -51,7 +37,7 @@ func LoadRules() (*Rules, error) {
 		}
 	}
 
-	return defaultRules.compile()
+	return defaultRules, nil
 }
 
 func loadDefaultRules() (*Rules, error) {
@@ -71,26 +57,8 @@ func loadDefaultRules() (*Rules, error) {
 
 func getMinimalDefaultRules() *Rules {
 	return &Rules{
-		Patterns: []PatternRule{
-			{
-				Name:        "api_keys",
-				Regex:       `(?i)api[_-]?key[s]?\s*[:=]\s*['"]?([a-zA-Z0-9_\-]{20,})['"]?`,
-				Replacement: "***FILTERED***",
-			},
-			{
-				Name:        "openai_keys",
-				Regex:       `sk-[a-zA-Z0-9]{48}`,
-				Replacement: "mask",
-			},
-		},
 		FileBlocks: []string{
 			".env", ".env.local", "*.key", "*.pem", "*secret*",
-		},
-		SearchBlocks: []string{
-			"api", "key", "secret", "password", "token",
-		},
-		CommandBlocks: []string{
-			"cat.*env", "printenv", "grep.*secret",
 		},
 	}
 }
@@ -103,36 +71,15 @@ func getUserConfigPath() string {
 }
 
 func mergeRules(base *Rules, override *Rules) *Rules {
-	result := &Rules{
-		Patterns:      make([]PatternRule, 0),
-		FileBlocks:    make([]string, 0),
-		SearchBlocks:  make([]string, 0),
-		CommandBlocks: make([]string, 0),
+	return &Rules{
+		FileBlocks: mergeStringSlices(base.FileBlocks, override.FileBlocks),
 	}
-	
-	patternMap := make(map[string]PatternRule)
-	for _, pattern := range base.Patterns {
-		patternMap[pattern.Name] = pattern
-	}
-
-	for _, pattern := range override.Patterns {
-		patternMap[pattern.Name] = pattern
-	}
-
-	for _, pattern := range patternMap {
-		result.Patterns = append(result.Patterns, pattern)
-	}
-	result.FileBlocks = mergeStringSlices(base.FileBlocks, override.FileBlocks)
-	result.SearchBlocks = mergeStringSlices(base.SearchBlocks, override.SearchBlocks)
-	result.CommandBlocks = mergeStringSlices(base.CommandBlocks, override.CommandBlocks)
-	
-	return result
 }
 
 func mergeStringSlices(base, override []string) []string {
 	seen := make(map[string]bool)
 	result := make([]string, 0)
-	
+
 	for _, item := range base {
 		if !seen[item] {
 			seen[item] = true
@@ -146,110 +93,71 @@ func mergeStringSlices(base, override []string) []string {
 			result = append(result, item)
 		}
 	}
-	
+
 	return result
 }
 
-func (r *Rules) compile() (*Rules, error) {
-	r.compiledPatterns = make([]*regexp.Regexp, len(r.Patterns))
-	for i, pattern := range r.Patterns {
-		compiled, err := regexp.Compile(pattern.Regex)
-		if err != nil {
-			return nil, err
+// containsBlockedPattern checks if text contains any of the file_blocks patterns
+func (r *Rules) containsBlockedPattern(text string) (bool, string) {
+	textLower := strings.ToLower(text)
+
+	for _, pattern := range r.FileBlocks {
+		patternLower := strings.ToLower(pattern)
+
+		if strings.Contains(pattern, "*") {
+			// For glob patterns like *.key, check if any word in the text matches
+			for _, word := range strings.Fields(textLower) {
+				if matched, _ := filepath.Match(patternLower, word); matched {
+					return true, pattern
+				}
+			}
+		} else {
+			if strings.Contains(textLower, patternLower) {
+				return true, pattern
+			}
 		}
-		r.compiledPatterns[i] = compiled
 	}
 
-	r.compiledCommandBlocks = make([]*regexp.Regexp, len(r.CommandBlocks))
-	for i, pattern := range r.CommandBlocks {
-		compiled, err := regexp.Compile(strings.ToLower(pattern))
-		if err != nil {
-			return nil, err
-		}
-		r.compiledCommandBlocks[i] = compiled
-	}
-
-	return r, nil
+	return false, ""
 }
 
 func (r *Rules) ShouldBlockFile(path string) (bool, string) {
-	pathLower := strings.ToLower(path)
-	
-	for _, pattern := range r.FileBlocks {
-		patternLower := strings.ToLower(pattern)
-		
-		if strings.Contains(pattern, "*") {
-			if matched, _ := filepath.Match(patternLower, pathLower); matched {
-				return true, "Access denied to sensitive file: " + path
-			}
-		} else {
-			if strings.Contains(pathLower, patternLower) {
-				return true, "Access denied to sensitive file: " + path
-			}
-		}
+	if blocked, pattern := r.containsBlockedPattern(path); blocked {
+		return true, "Access denied to sensitive file matching '" + pattern + "': " + path
 	}
-	
 	return false, ""
 }
 
-func (r *Rules) ShouldBlockSearch(pattern string) (bool, string) {
-	patternLower := strings.ToLower(pattern)
-	
-	for _, blocked := range r.SearchBlocks {
-		if strings.Contains(patternLower, strings.ToLower(blocked)) {
-			return true, "Search pattern may expose sensitive data: " + pattern
-		}
-	}
-	
-	return false, ""
+// Commands that read/output file contents
+var contentReadingVerbs = []string{
+	"cat", "head", "tail", "less", "more", "type",
+	"grep", "rg", "awk", "sed",
+	"source", "printenv", "export",
 }
 
 func (r *Rules) ShouldBlockCommand(cmd string) (bool, string) {
 	cmdLower := strings.ToLower(cmd)
-	
-	for _, pattern := range r.compiledCommandBlocks {
-		if pattern.MatchString(cmdLower) {
-			return true, "Command may expose sensitive data: " + cmd
+
+	// Only block if the command both reads content AND references a blocked file
+	hasReadVerb := false
+	for _, verb := range contentReadingVerbs {
+		// Check if the verb appears as a word (at start, after pipe, after &&, after ;)
+		if strings.HasPrefix(cmdLower, verb+" ") ||
+			strings.HasPrefix(cmdLower, verb+"\t") ||
+			strings.Contains(cmdLower, "| "+verb) ||
+			strings.Contains(cmdLower, "&& "+verb) ||
+			strings.Contains(cmdLower, "; "+verb) {
+			hasReadVerb = true
+			break
 		}
 	}
-	
+
+	if !hasReadVerb {
+		return false, ""
+	}
+
+	if blocked, pattern := r.containsBlockedPattern(cmd); blocked {
+		return true, "Command may expose blocked file '" + pattern + "': " + cmd
+	}
 	return false, ""
-}
-
-type FilterResult struct {
-	Content  string
-	Filtered bool
-}
-
-func (r *Rules) FilterContent(text string) FilterResult {
-	filtered := text
-	hasChanged := false
-
-	for i, pattern := range r.compiledPatterns {
-		rule := r.Patterns[i]
-		original := filtered
-
-		switch rule.Replacement {
-		case "mask":
-			filtered = pattern.ReplaceAllStringFunc(filtered, func(match string) string {
-				return strings.Repeat("*", len(match))
-			})
-		case "env_filter":
-			filtered = pattern.ReplaceAllStringFunc(filtered, func(match string) string {
-				parts := strings.SplitN(match, "=", 2)
-				if len(parts) == 2 {
-					return parts[0] + "=***FILTERED***"
-				}
-				return match
-			})
-		default:
-			filtered = pattern.ReplaceAllString(filtered, rule.Replacement)
-		}
-
-		if filtered != original {
-			hasChanged = true
-		}
-	}
-
-	return FilterResult{Content: filtered, Filtered: hasChanged}
 }
