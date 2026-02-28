@@ -99,10 +99,8 @@ func (c *ClaudeHookProcessor) shouldBlockTool(toolName string, toolInput map[str
 			}
 		}
 		
-	case "Bash":
-		if command, ok := toolInput["command"].(string); ok {
-			return c.rules.ShouldBlockCommand(command)
-		}
+	// NOTE(khoa): Bash commands already go through Claude Code's permission
+	// dialog, so the user can approve/deny them directly. No need to block here.
 	}
 	
 	return false, ""
