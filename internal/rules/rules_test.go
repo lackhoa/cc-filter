@@ -9,6 +9,7 @@ func testRules() *Rules {
 		FileBlocks: []string{
 			".env", ".env.local", "secrets.json", "credentials.json",
 			"*.key", "*.pem", "*secret*",
+			"secrets", "secrets.*",
 		},
 	}
 }
@@ -110,6 +111,40 @@ func TestContainsBlockedPattern(t *testing.T) {
 		blocked, _ := r.containsBlockedPattern(tt.text)
 		if blocked != tt.blocked {
 			t.Errorf("containsBlockedPattern(%q) = %v, want %v", tt.text, blocked, tt.blocked)
+		}
+	}
+}
+
+func TestShouldBlockFileWithSymlinkedPaths(t *testing.T) {
+	r := testRules()
+
+	tests := []struct {
+		path    string
+		blocked bool
+		desc    string
+	}{
+		// "secrets" as a directory name in path (substring match)
+		{"/c/Users/vodan/eatlab-drive/secrets/secrets.txt", true, "secrets dir on drive"},
+		{"/c/Users/vodan/personal-drive/secrets/credentials.json", true, "personal-drive secrets"},
+		{"C:\\Users\\vodan\\eatlab-drive\\secrets\\.env", true, "Windows backslash path"},
+
+		// "secrets.*" glob matching against path segments
+		{"/home/user/project/secrets.yml", true, "secrets.yml anywhere"},
+		{"/home/user/project/secrets.json", true, "secrets.json anywhere"},
+
+		// "*.key" and "*.pem" glob matching against path segments
+		{"/home/user/.ssh/id_rsa.key", true, "key file in deep path"},
+		{"/etc/ssl/server.pem", true, "pem file in deep path"},
+
+		// Should NOT block
+		{"/home/user/project/main.go", false, "normal go file"},
+		{"/home/user/docs/secret-recipe.md", true, "matches *secret*"},
+	}
+
+	for _, tt := range tests {
+		blocked, _ := r.ShouldBlockFile(tt.path)
+		if blocked != tt.blocked {
+			t.Errorf("[%s] ShouldBlockFile(%q) = %v, want %v", tt.desc, tt.path, blocked, tt.blocked)
 		}
 	}
 }

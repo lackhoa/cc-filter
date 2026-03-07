@@ -97,6 +97,13 @@ func mergeStringSlices(base, override []string) []string {
 	return result
 }
 
+// splitPathSegments splits a path into segments by / or \
+func splitPathSegments(path string) []string {
+	// Normalize to forward slashes, then split
+	normalized := strings.ReplaceAll(path, "\\", "/")
+	return strings.Split(normalized, "/")
+}
+
 // containsBlockedPattern checks if text contains any of the file_blocks patterns
 func (r *Rules) containsBlockedPattern(text string) (bool, string) {
 	textLower := strings.ToLower(text)
@@ -105,10 +112,21 @@ func (r *Rules) containsBlockedPattern(text string) (bool, string) {
 		patternLower := strings.ToLower(pattern)
 
 		if strings.Contains(pattern, "*") {
-			// For glob patterns like *.key, check if any word in the text matches
-			for _, word := range strings.Fields(textLower) {
-				if matched, _ := filepath.Match(patternLower, word); matched {
+			// Match glob patterns against each path segment in the text.
+			// This handles patterns like "*.key" or "*secret*" matching
+			// individual components of a file path.
+			segments := splitPathSegments(textLower)
+			for _, seg := range segments {
+				if matched, _ := filepath.Match(patternLower, seg); matched {
 					return true, pattern
+				}
+			}
+			// Also check whitespace-separated words (for command matching)
+			for _, word := range strings.Fields(textLower) {
+				for _, seg := range splitPathSegments(word) {
+					if matched, _ := filepath.Match(patternLower, seg); matched {
+						return true, pattern
+					}
 				}
 			}
 		} else {
