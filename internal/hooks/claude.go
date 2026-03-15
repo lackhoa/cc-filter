@@ -50,6 +50,22 @@ func (c *ClaudeHookProcessor) processPreToolUse(input map[string]interface{}) (s
 	toolName, _ := input["tool_name"].(string)
 	toolInputRaw, _ := input["tool_input"].(map[string]interface{})
 
+	// Check if this command should be auto-approved (e.g. safe SSH commands)
+	if toolName == "Bash" {
+		if command, ok := toolInputRaw["command"].(string); ok {
+			if c.rules.IsSSHCommandSafe(command) || c.rules.IsCommandSafe(command) {
+				response := map[string]interface{}{
+					"hookSpecificOutput": map[string]interface{}{
+						"hookEventName":      "PreToolUse",
+						"permissionDecision": "allow",
+					},
+				}
+				responseJSON, err := json.Marshal(response)
+				return string(responseJSON), err
+			}
+		}
+	}
+
 	// Check if this tool should be blocked
 	shouldBlock, reason := c.shouldBlockTool(toolName, toolInputRaw)
 

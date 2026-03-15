@@ -8,8 +8,248 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type SafeCommands struct {
+	AllowedCommands    []string `yaml:"allowed_commands"`
+	AllowedPipeTargets []string `yaml:"allowed_pipe_targets"`
+}
+
 type Rules struct {
-	FileBlocks []string `yaml:"file_blocks"`
+	FileBlocks   []string      `yaml:"file_blocks"`
+	SafeCommands *SafeCommands `yaml:"safe_commands"`
+}
+
+// Shell token types
+type tokenType int
+
+const (
+	tokWord       tokenType = iota
+	tokPipe                 // |
+	tokAnd                  // &&
+	tokOr                   // ||
+	tokSemicolon            // ;
+	tokBackground           // &
+)
+
+type token struct {
+	typ   tokenType
+	value string
+}
+
+func isWordChar(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') ||
+		(ch >= 'A' && ch <= 'Z') ||
+		(ch >= '0' && ch <= '9') ||
+		ch == '-' || ch == '_' || ch == '.' || ch == '/' ||
+		ch == '~' || ch == '@' || ch == ':' || ch == '=' ||
+		ch == '+' || ch == '%' || ch == ',' || ch == '*' || ch == '?'
+}
+
+// tokenize splits a shell command into words and operators.
+// Returns nil if the command contains unsafe or unparseable constructs
+// (backticks, $(), redirections, unclosed quotes).
+func tokenize(cmd string) []token {
+	var tokens []token
+	i := 0
+	for i < len(cmd) {
+		ch := cmd[i]
+		if ch == ' ' || ch == '\t' {
+			i++
+			continue
+		}
+
+		if ch == '`' || ch == '>' || ch == '<' {
+			return nil
+		}
+		if ch == ';' {
+			tokens = append(tokens, token{tokSemicolon, ";"})
+			i++
+			continue
+		}
+		if ch == '&' {
+			if i+1 < len(cmd) && cmd[i+1] == '&' {
+				tokens = append(tokens, token{tokAnd, "&&"})
+				i += 2
+				continue
+			}
+			tokens = append(tokens, token{tokBackground, "&"})
+			i++
+			continue
+		}
+		if ch == '|' {
+			if i+1 < len(cmd) && cmd[i+1] == '|' {
+				tokens = append(tokens, token{tokOr, "||"})
+				i += 2
+				continue
+			}
+			tokens = append(tokens, token{tokPipe, "|"})
+			i++
+			continue
+		}
+		if ch == '$' && i+1 < len(cmd) && cmd[i+1] == '(' {
+			return nil
+		}
+
+		// Parse a word (handles quoted strings)
+		var word strings.Builder
+		for i < len(cmd) {
+			ch = cmd[i]
+			// NOTE Handle single quote
+			if ch == '\'' {
+				i++
+				for i < len(cmd) && cmd[i] != '\'' {
+					word.WriteByte(cmd[i])
+					i++
+				}
+				if i >= len(cmd) {
+					// unclosed single quote
+					return nil
+				}
+				i++
+				continue
+			}
+
+			// NOTE Handle double quote
+			if ch == '"' {
+				i++
+				for i < len(cmd) && cmd[i] != '"' {
+					// NOTE: backticks and $() are still live inside double quotes in shell
+					if cmd[i] == '`' || (cmd[i] == '$' && i+1 < len(cmd) && cmd[i+1] == '(') {
+						return nil
+					}
+					word.WriteByte(cmd[i])
+					i++
+				}
+				if i >= len(cmd) {
+					// unclosed double quote
+					return nil
+				}
+				i++
+				continue
+			}
+
+			if !isWordChar(ch) {
+				break
+			}
+
+			// NOTE normal characters
+			word.WriteByte(ch)
+			i++
+		}
+		if word.Len() == 0 {
+			return nil
+		}
+		tokens = append(tokens, token{tokWord, word.String()})
+	}
+	return tokens
+}
+
+// IsCommandSafe checks if a command is safe to auto-approve
+func (r *Rules) IsCommandSafe(command string) bool {
+	if r.SafeCommands == nil {
+		return false
+	}
+
+	tokens := tokenize(strings.TrimSpace(command))
+	if len(tokens) == 0 {
+		return false
+	}
+
+	// Append sentinel so the loop validates the last command too
+	tokens = append(tokens, token{tokSemicolon, ";"})
+
+	var words []string
+	isPipeTarget := false
+
+	for _, tok := range tokens {
+		if tok.typ == tokWord {
+			words = append(words, tok.value)
+			continue
+		}
+		// Hit an operator — validate the accumulated command
+		if len(words) == 0 {
+			return false // operator with no preceding command (e.g. "| ls", "&& ls")
+		}
+		if isPipeTarget {
+			if !r.matchesPipeTarget(words) {
+				return false
+			}
+		} else {
+			if !r.matchesAllowedCommand(words) {
+				return false
+			}
+		}
+		words = nil
+		isPipeTarget = tok.typ == tokPipe
+	}
+	return true
+}
+
+func matchesAnyPrefix(words []string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		prefixWords := strings.Fields(prefix)
+		if len(words) >= len(prefixWords) {
+			match := true
+			for i, pw := range prefixWords {
+				if words[i] != pw {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *Rules) matchesAllowedCommand(words []string) bool {
+	return matchesAnyPrefix(words, r.SafeCommands.AllowedCommands)
+}
+
+func (r *Rules) matchesPipeTarget(words []string) bool {
+	return matchesAnyPrefix(words, r.SafeCommands.AllowedPipeTargets)
+}
+
+func (r *Rules) IsSSHCommandSafe(command string) bool {
+	server, remoteCmd := parseSSHCommand(command)
+	if server == "" || remoteCmd == "" {
+		return false
+	}
+	return r.IsCommandSafe(remoteCmd)
+}
+
+func parseSSHCommand(command string) (server, remoteCmd string) {
+	command = strings.TrimSpace(command)
+	if !strings.HasPrefix(command, "ssh ") {
+		return "", ""
+	}
+
+	rest := strings.TrimSpace(command[4:])
+
+	// First token is the server (must not start with -)
+	spaceIdx := strings.IndexAny(rest, " \t")
+	if spaceIdx == -1 {
+		return "", ""
+	}
+
+	server = rest[:spaceIdx]
+	if strings.HasPrefix(server, "-") {
+		// SSH flags not supported — fall through to normal permission system
+		return "", ""
+	}
+
+	remoteCmd = strings.TrimSpace(rest[spaceIdx:])
+
+	// Strip outer quotes if the entire remote command is quoted
+	if len(remoteCmd) >= 2 {
+		if (remoteCmd[0] == '"' && remoteCmd[len(remoteCmd)-1] == '"') ||
+			(remoteCmd[0] == '\'' && remoteCmd[len(remoteCmd)-1] == '\'') {
+			remoteCmd = remoteCmd[1 : len(remoteCmd)-1]
+		}
+	}
+
+	return server, remoteCmd
 }
 
 func LoadRules() (*Rules, error) {
@@ -28,40 +268,58 @@ func LoadRules() (*Rules, error) {
 		}
 	}
 
-	// merge project config if exists
-	projectConfigPath := "config.yaml"
-	if data, err := os.ReadFile(projectConfigPath); err == nil {
-		var projectRules Rules
-		if err := yaml.Unmarshal(data, &projectRules); err == nil {
-			defaultRules = mergeRules(defaultRules, &projectRules)
-		}
-	}
-
 	return defaultRules, nil
 }
 
 func loadDefaultRules() (*Rules, error) {
-	configPath := "configs/default-rules.yaml"
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return getMinimalDefaultRules(), nil
-	}
-
 	var rules Rules
-	if err := yaml.Unmarshal(data, &rules); err != nil {
+	if err := yaml.Unmarshal([]byte(defaultRulesYAML), &rules); err != nil {
 		return nil, err
 	}
-
 	return &rules, nil
 }
 
-func getMinimalDefaultRules() *Rules {
-	return &Rules{
-		FileBlocks: []string{
-			".env", ".env.local", "*.key", "*.pem", "*secret*",
-		},
-	}
-}
+// NOTE: keep in sync with configs/default-rules.yaml
+var defaultRulesYAML = `
+file_blocks:
+  - ".env"
+  - ".env.local"
+  - ".env.development"
+  - ".env.production"
+  - ".env.staging"
+  - ".env.test"
+  - "config.json"
+  - "secrets.json"
+  - "credentials.json"
+  - "auth.json"
+  - "keys.json"
+  - "*.key"
+  - "*.pem"
+  - "*.p12"
+  - "*.pfx"
+  - "*secret*"
+  - "*credential*"
+
+safe_commands:
+  allowed_commands:
+    - "ls"
+    - "df"
+    - "du"
+    - "ps"
+    - "uptime"
+    - "free"
+    - "whoami"
+    - "hostname"
+    - "docker ps"
+    - "docker stats"
+    - "docker compose ps"
+    - "docker compose ls"
+    - "ffprobe"
+  allowed_pipe_targets:
+    - "head"
+    - "tail"
+    - "grep"
+`
 
 func getUserConfigPath() string {
 	if homeDir, err := os.UserHomeDir(); err == nil {
@@ -72,7 +330,24 @@ func getUserConfigPath() string {
 
 func mergeRules(base *Rules, override *Rules) *Rules {
 	return &Rules{
-		FileBlocks: mergeStringSlices(base.FileBlocks, override.FileBlocks),
+		FileBlocks:   mergeStringSlices(base.FileBlocks, override.FileBlocks),
+		SafeCommands: mergeSafeCommands(base.SafeCommands, override.SafeCommands),
+	}
+}
+
+func mergeSafeCommands(base, override *SafeCommands) *SafeCommands {
+	if base == nil && override == nil {
+		return nil
+	}
+	if base == nil {
+		return override
+	}
+	if override == nil {
+		return base
+	}
+	return &SafeCommands{
+		AllowedCommands:    mergeStringSlices(base.AllowedCommands, override.AllowedCommands),
+		AllowedPipeTargets: mergeStringSlices(base.AllowedPipeTargets, override.AllowedPipeTargets),
 	}
 }
 
