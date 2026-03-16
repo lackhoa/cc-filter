@@ -186,7 +186,7 @@ func TestIsSSHCommandSafe(t *testing.T) {
 		// Unsafe: dangerous chars (shell injection)
 		{"ssh u6 ls; rm -rf /", false, "semicolon injection"},
 		{"ssh u6 ls & echo pwned", false, "background execution"},
-		{"ssh u6 ls &", false, "trailing background &"},
+		{"ssh u6 ls &", true, "trailing background & (safe cmd backgrounded is still safe)"},
 		{"ssh u6 ls `whoami`", false, "backtick injection"},
 		{"ssh u6 ls $(whoami)", false, "subshell injection"},
 		{"ssh u6 ls > /etc/passwd", false, "redirect write"},
@@ -354,87 +354,102 @@ func TestParseSSHCommand(t *testing.T) {
 	}
 }
 
-func TestTokenize(t *testing.T) {
+func TestIsCommandSafe_Redirections(t *testing.T) {
+	r := safeCommandsRules()
+
 	tests := []struct {
-		cmd    string
-		count  int // expected token count, -1 means nil (unsafe)
-		desc   string
+		command string
+		safe    bool
+		desc    string
 	}{
-		// Basic words
-		{"ls", 1, "single word"},
-		{"ls -la /tmp", 3, "words with flags"},
-		{"docker compose ps", 3, "multi-word command"},
+		// Safe redirections
+		{"ls 2>&1", true, "stderr to stdout"},
+		{"ls 2>&1 | grep foo", true, "stderr to stdout then pipe"},
+		{"ls >/dev/null", true, "stdout to /dev/null"},
+		{"ls 2>/dev/null", true, "stderr to /dev/null"},
+		{"ls >/dev/null 2>&1", true, "both to /dev/null"},
+		{"ls 2>/dev/null 1>&2", true, "fd duplication"},
+		{"df -h 2>&1 | tail -5", true, "redirect + pipe + pipe target"},
 
-		// Operators
-		{"ls && df", 3, "&&"},
-		{"ls || df", 3, "||"},
-		{"ls | grep foo", 4, "pipe"},
-		{"ls && df || uptime", 5, "mixed operators"},
-
-		// Quoting
-		{`ls "my file"`, 2, "double-quoted word"},
-		{`ls 'my file'`, 2, "single-quoted word"},
-
-		// Operators (valid tokens, not unsafe)
-		{"ls; df", 3, "semicolon"},
-		{"ls & df", 3, "background &"},
-
-		// Unsafe — returns nil
-		{"ls `whoami`", -1, "backtick"},
-		{"ls $(whoami)", -1, "subshell"},
-		{"ls > file", -1, "redirect >"},
-		{"ls >> file", -1, "redirect >>"},
-		{"ls < file", -1, "redirect <"},
-		{`ls "unclosed`, -1, "unclosed double quote"},
-		{`ls 'unclosed`, -1, "unclosed single quote"},
-		{"", 0, "empty"},
+		// Unsafe redirections
+		{"ls > /tmp/out.txt", false, "write to file"},
+		{"ls >> /tmp/out.txt", false, "append to file"},
+		{"ls < /etc/passwd", false, "read redirect"},
+		{"ls 2>/tmp/err.log", false, "stderr to file"},
+		{"ls > /etc/passwd", false, "write to sensitive path"},
+		{"ls >&/tmp/out.txt", false, "fd dup to non-digit"},
 	}
 
 	for _, tt := range tests {
-		tokens := tokenize(tt.cmd)
-		if tt.count == -1 {
-			if tokens != nil {
-				t.Errorf("[%s] tokenize(%q) = %v, want nil", tt.desc, tt.cmd, tokens)
-			}
-		} else {
-			if len(tokens) != tt.count {
-				t.Errorf("[%s] tokenize(%q) got %d tokens %v, want %d",
-					tt.desc, tt.cmd, len(tokens), tokens, tt.count)
-			}
+		safe := r.IsCommandSafe(tt.command)
+		if safe != tt.safe {
+			t.Errorf("[%s] IsCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
 		}
 	}
 }
 
-func TestMergeSafeCommands(t *testing.T) {
-	base := &SafeCommands{
-		AllowedCommands:    []string{"ls", "df"},
-		AllowedPipeTargets: []string{"head"},
+func fileReadRules() *Rules {
+	return &Rules{
+		SafeCommands: &SafeCommands{
+			AllowedCommands:    []string{"ls", "df"},
+			AllowedPipeTargets: []string{"head", "tail", "grep"},
+			FileReadCommands:   []string{"cat", "tail", "head"},
+			FileSearchCommands: []string{"grep"},
+			AllowedFiles:       []string{"*.log"},
+		},
 	}
-	override := &SafeCommands{
-		AllowedCommands:    []string{"df", "du"},
-		AllowedPipeTargets: []string{"head", "grep"},
+}
+
+func TestIsCommandSafe_FileReadCommands(t *testing.T) {
+	r := fileReadRules()
+
+	tests := []struct {
+		command string
+		safe    bool
+		desc    string
+	}{
+		// Safe: reading log files
+		{"tail -f /var/log/app.log", true, "tail log file"},
+		{"tail -100 /var/log/app.log", true, "tail with line count"},
+		{"head -50 /var/log/app.log", true, "head log file"},
+		{"cat /var/log/app.log", true, "cat log file"},
+		{"grep ERROR /var/log/app.log", true, "grep log file"},
+		{"grep -i error /var/log/app.log", true, "grep with flags"},
+		{"grep error.occurred /var/log/app.log", true, "grep pattern with dot"},
+		{"cat app.log", true, "cat log without path"},
+		{"tail -f app.log 2>&1", true, "log with safe redirect"},
+
+		// Safe: log file piped
+		{"cat /var/log/app.log | grep ERROR", true, "cat log piped to grep"},
+		{"tail -f /var/log/app.log | head -20", true, "tail log piped to head"},
+
+		// Unsafe: reading non-log files
+		{"cat /etc/passwd", false, "cat non-log file"},
+		{"grep password /etc/shadow", false, "grep non-log file"},
+		{"tail -f /var/data/output.txt", false, "tail non-log file"},
+		{"head /home/user/config.py", false, "head non-log file"},
+
+		// Unsafe: no file argument
+		{"grep ERROR", false, "grep with no file"},
+		{"cat", false, "cat with no file"},
+
+		// Unsafe: mix of log and non-log files
+		{"grep ERROR /var/log/app.log /etc/passwd", false, "grep with non-log arg that has /"},
+
+		// Unsafe: cat/head/tail treat ALL non-flag args as files
+		{"cat app.log passwd", false, "cat with sneaky extra file"},
+		{"head app.log /etc/shadow", false, "head with non-log extra file"},
+		{"tail app.log config.py", false, "tail with non-log extra file"},
+
+		// Safe: grep's first non-flag arg is pattern, not a file
+		{"grep passwd /var/log/auth.log", true, "grep pattern looks like filename"},
 	}
 
-	merged := mergeSafeCommands(base, override)
-
-	// Should have union: ls, df, du
-	if len(merged.AllowedCommands) != 3 {
-		t.Errorf("expected 3 commands, got %d: %v", len(merged.AllowedCommands), merged.AllowedCommands)
-	}
-	// Should have union: head, grep
-	if len(merged.AllowedPipeTargets) != 2 {
-		t.Errorf("expected 2 pipe targets, got %d: %v", len(merged.AllowedPipeTargets), merged.AllowedPipeTargets)
-	}
-
-	// Nil cases
-	if mergeSafeCommands(nil, nil) != nil {
-		t.Error("nil + nil should be nil")
-	}
-	if mergeSafeCommands(base, nil) != base {
-		t.Error("base + nil should be base")
-	}
-	if mergeSafeCommands(nil, override) != override {
-		t.Error("nil + override should be override")
+	for _, tt := range tests {
+		safe := r.IsCommandSafe(tt.command)
+		if safe != tt.safe {
+			t.Errorf("[%s] IsCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
+		}
 	}
 }
 

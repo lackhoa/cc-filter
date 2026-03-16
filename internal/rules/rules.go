@@ -1,16 +1,22 @@
 package rules
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 type SafeCommands struct {
 	AllowedCommands    []string `yaml:"allowed_commands"`
 	AllowedPipeTargets []string `yaml:"allowed_pipe_targets"`
+	FileReadCommands   []string `yaml:"file_read_commands"`
+	FileSearchCommands []string `yaml:"file_search_commands"`
+	AllowedFiles       []string `yaml:"allowed_files"`
 }
 
 type Rules struct {
@@ -18,168 +24,139 @@ type Rules struct {
 	SafeCommands *SafeCommands `yaml:"safe_commands"`
 }
 
-// Shell token types
-type tokenType int
-
-const (
-	tokWord       tokenType = iota
-	tokPipe                 // |
-	tokAnd                  // &&
-	tokOr                   // ||
-	tokSemicolon            // ;
-	tokBackground           // &
-)
-
-type token struct {
-	typ   tokenType
-	value string
-}
-
-func isWordChar(ch byte) bool {
-	return (ch >= 'a' && ch <= 'z') ||
-		(ch >= 'A' && ch <= 'Z') ||
-		(ch >= '0' && ch <= '9') ||
-		ch == '-' || ch == '_' || ch == '.' || ch == '/' ||
-		ch == '~' || ch == '@' || ch == ':' || ch == '=' ||
-		ch == '+' || ch == '%' || ch == ',' || ch == '*' || ch == '?'
-}
-
-// tokenize splits a shell command into words and operators.
-// Returns nil if the command contains unsafe or unparseable constructs
-// (backticks, $(), redirections, unclosed quotes).
-func tokenize(cmd string) []token {
-	var tokens []token
-	i := 0
-	for i < len(cmd) {
-		ch := cmd[i]
-		if ch == ' ' || ch == '\t' {
-			i++
-			continue
-		}
-
-		if ch == '`' || ch == '>' || ch == '<' {
-			return nil
-		}
-		if ch == ';' {
-			tokens = append(tokens, token{tokSemicolon, ";"})
-			i++
-			continue
-		}
-		if ch == '&' {
-			if i+1 < len(cmd) && cmd[i+1] == '&' {
-				tokens = append(tokens, token{tokAnd, "&&"})
-				i += 2
-				continue
-			}
-			tokens = append(tokens, token{tokBackground, "&"})
-			i++
-			continue
-		}
-		if ch == '|' {
-			if i+1 < len(cmd) && cmd[i+1] == '|' {
-				tokens = append(tokens, token{tokOr, "||"})
-				i += 2
-				continue
-			}
-			tokens = append(tokens, token{tokPipe, "|"})
-			i++
-			continue
-		}
-		if ch == '$' && i+1 < len(cmd) && cmd[i+1] == '(' {
-			return nil
-		}
-
-		// Parse a word (handles quoted strings)
-		var word strings.Builder
-		for i < len(cmd) {
-			ch = cmd[i]
-			// NOTE Handle single quote
-			if ch == '\'' {
-				i++
-				for i < len(cmd) && cmd[i] != '\'' {
-					word.WriteByte(cmd[i])
-					i++
+// wordToString extracts a plain string from a syntax.Word.
+// Returns ("", false) if the word contains any expansions ($var, $(cmd), etc.)
+func wordToString(word *syntax.Word) (string, bool) {
+	var sb strings.Builder
+	for _, part := range word.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			sb.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			sb.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, dp := range p.Parts {
+				lit, ok := dp.(*syntax.Lit)
+				if !ok {
+					return "", false
 				}
-				if i >= len(cmd) {
-					// unclosed single quote
-					return nil
-				}
-				i++
-				continue
+				sb.WriteString(lit.Value)
 			}
-
-			// NOTE Handle double quote
-			if ch == '"' {
-				i++
-				for i < len(cmd) && cmd[i] != '"' {
-					// NOTE: backticks and $() are still live inside double quotes in shell
-					if cmd[i] == '`' || (cmd[i] == '$' && i+1 < len(cmd) && cmd[i+1] == '(') {
-						return nil
-					}
-					word.WriteByte(cmd[i])
-					i++
-				}
-				if i >= len(cmd) {
-					// unclosed double quote
-					return nil
-				}
-				i++
-				continue
-			}
-
-			if !isWordChar(ch) {
-				break
-			}
-
-			// NOTE normal characters
-			word.WriteByte(ch)
-			i++
+		default:
+			return "", false
 		}
-		if word.Len() == 0 {
-			return nil
-		}
-		tokens = append(tokens, token{tokWord, word.String()})
 	}
-	return tokens
+	return sb.String(), true
 }
 
-// IsCommandSafe checks if a command is safe to auto-approve
+// isRedirectSafe checks if a redirect is harmless (fd duplication or /dev/null)
+func isRedirectSafe(redir *syntax.Redirect) bool {
+	// NOTE fd duplication like 2>&1 — just moves output between fds, harmless
+	if redir.Op == syntax.DplOut || redir.Op == syntax.DplIn {
+		target, ok := wordToString(redir.Word)
+		if !ok {
+			return false
+		}
+		// Allow >&1, >&2, <&0, etc. (single digit fd) and >&- (close fd)
+		return (len(target) == 1 && target[0] >= '0' && target[0] <= '9') || target == "-"
+	}
+
+	// NOTE output to /dev/null — discarding output, harmless
+	if redir.Op == syntax.RdrOut || redir.Op == syntax.AppOut {
+		target, ok := wordToString(redir.Word)
+		return ok && target == "/dev/null"
+	}
+
+	return false
+}
+
+// argsToStrings extracts plain strings from a list of syntax.Word.
+// Returns nil if any word contains expansions.
+func argsToStrings(args []*syntax.Word) []string {
+	words := make([]string, 0, len(args))
+	for _, arg := range args {
+		s, ok := wordToString(arg)
+		if !ok {
+			return nil
+		}
+		words = append(words, s)
+	}
+	return words
+}
+
+// isStmtSafe checks if a single statement (with its redirects) is safe.
+func (r *Rules) isStmtSafe(stmt *syntax.Stmt, isPipeTarget bool) bool {
+	// NOTE Negated = "! cmd" (negate exit code), Coprocess = "coproc cmd" (run as coprocess)
+	// Neither is expected in safe read-only commands, reject to be safe
+	if stmt.Negated || stmt.Coprocess {
+		return false
+	}
+
+	for _, redir := range stmt.Redirs {
+		if !isRedirectSafe(redir) {
+			return false
+		}
+	}
+
+	if stmt.Cmd == nil {
+		return false
+	}
+
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.CallExpr:
+		// NOTE CallExpr = simple command or bare assignment (FOO=bar)
+		if len(cmd.Args) == 0 {
+			return false
+		}
+		words := argsToStrings(cmd.Args)
+		if words == nil {
+			return false
+		}
+		if isPipeTarget {
+			return r.matchesPipeTarget(words)
+		}
+		if r.matchesAllowedCommand(words) {
+			return true
+		}
+		return r.matchesSafeFileReadCommand(words)
+
+	case *syntax.BinaryCmd:
+		switch cmd.Op {
+		case syntax.Pipe, syntax.PipeAll:
+			return r.isStmtSafe(cmd.X, isPipeTarget) && r.isStmtSafe(cmd.Y, true)
+		case syntax.AndStmt, syntax.OrStmt:
+			return r.isStmtSafe(cmd.X, isPipeTarget) && r.isStmtSafe(cmd.Y, isPipeTarget)
+		default:
+			return false
+		}
+
+	default:
+		// Subshells, if/for/while, functions, etc. — not auto-approved
+		return false
+	}
+}
+
+// IsCommandSafe checks if a command is safe to auto-approve using shell AST parsing.
 func (r *Rules) IsCommandSafe(command string) bool {
 	if r.SafeCommands == nil {
 		return false
 	}
 
-	tokens := tokenize(strings.TrimSpace(command))
-	if len(tokens) == 0 {
+	command = strings.TrimSpace(command)
+	if command == "" {
 		return false
 	}
 
-	// Append sentinel so the loop validates the last command too
-	tokens = append(tokens, token{tokSemicolon, ";"})
+	parser := syntax.NewParser(syntax.KeepComments(false))
+	file, err := parser.Parse(strings.NewReader(command), "")
+	if err != nil {
+		return false
+	}
 
-	var words []string
-	isPipeTarget := false
-
-	for _, tok := range tokens {
-		if tok.typ == tokWord {
-			words = append(words, tok.value)
-			continue
+	for _, stmt := range file.Stmts {
+		if !r.isStmtSafe(stmt, false) {
+			return false
 		}
-		// Hit an operator — validate the accumulated command
-		if len(words) == 0 {
-			return false // operator with no preceding command (e.g. "| ls", "&& ls")
-		}
-		if isPipeTarget {
-			if !r.matchesPipeTarget(words) {
-				return false
-			}
-		} else {
-			if !r.matchesAllowedCommand(words) {
-				return false
-			}
-		}
-		words = nil
-		isPipeTarget = tok.typ == tokPipe
 	}
 	return true
 }
@@ -209,6 +186,49 @@ func (r *Rules) matchesAllowedCommand(words []string) bool {
 
 func (r *Rules) matchesPipeTarget(words []string) bool {
 	return matchesAnyPrefix(words, r.SafeCommands.AllowedPipeTargets)
+}
+
+// matchesSafeFileReadCommand checks if a file-reading command is safe.
+// Two kinds:
+//   - FileReadCommands (cat, head, tail): ALL non-flag args are files, must match AllowedFiles
+//   - FileSearchCommands (grep): first non-flag arg is a search pattern (skip it),
+//     remaining non-flag args are files and must match AllowedFiles
+func (r *Rules) matchesSafeFileReadCommand(words []string) bool {
+	cmd := words[0]
+	skipFirstArg := false
+
+	if slices.Contains(r.SafeCommands.FileSearchCommands, cmd) {
+		skipFirstArg = true
+	} else if !slices.Contains(r.SafeCommands.FileReadCommands, cmd) {
+		return false
+	}
+
+	hasFileArg := false
+	skippedSearchPattern := false
+	for _, arg := range words[1:] {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		// NOTE for search commands like grep, the first non-flag arg is the search pattern
+		if skipFirstArg && !skippedSearchPattern {
+			skippedSearchPattern = true
+			continue
+		}
+		if !matchesAnyFilePattern(filepath.Base(arg), r.SafeCommands.AllowedFiles) {
+			return false
+		}
+		hasFileArg = true
+	}
+	return hasFileArg
+}
+
+func matchesAnyFilePattern(basename string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if matched, _ := filepath.Match(pattern, basename); matched {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Rules) IsSSHCommandSafe(command string) bool {
@@ -253,155 +273,24 @@ func parseSSHCommand(command string) (server, remoteCmd string) {
 }
 
 func LoadRules() (*Rules, error) {
-	// start with defaults
-	defaultRules, err := loadDefaultRules()
+	configPath := getConfigPath()
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading config %s: %w", configPath, err)
 	}
 
-	// merge user config if exists
-	userConfigPath := getUserConfigPath()
-	if data, err := os.ReadFile(userConfigPath); err == nil {
-		var userRules Rules
-		if err := yaml.Unmarshal(data, &userRules); err == nil {
-			defaultRules = mergeRules(defaultRules, &userRules)
-		}
-	}
-
-	return defaultRules, nil
-}
-
-func loadDefaultRules() (*Rules, error) {
 	var rules Rules
-	if err := yaml.Unmarshal([]byte(defaultRulesYAML), &rules); err != nil {
-		return nil, err
+	if err := yaml.Unmarshal(data, &rules); err != nil {
+		return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
 	}
 	return &rules, nil
 }
 
-// NOTE: keep in sync with configs/default-rules.yaml
-var defaultRulesYAML = `
-file_blocks:
-  - ".env"
-  - ".env.local"
-  - ".env.development"
-  - ".env.production"
-  - ".env.staging"
-  - ".env.test"
-  - "config.json"
-  - "secrets.json"
-  - "credentials.json"
-  - "auth.json"
-  - "keys.json"
-  - "*.key"
-  - "*.pem"
-  - "*.p12"
-  - "*.pfx"
-  - "*secret*"
-  - "*credential*"
-
-safe_commands:
-  allowed_commands:
-    - "ls"
-    - "cd"
-    - "pwd"
-    - "which"
-    - "file"
-    - "stat"
-    - "date"
-    - "echo"
-    - "df"
-    - "du"
-    - "ps"
-    - "uptime"
-    - "free"
-    - "whoami"
-    - "hostname"
-    - "uname"
-    - "id"
-    - "docker ps"
-    - "docker stats"
-    - "docker logs"
-    - "docker inspect"
-    - "docker compose ps"
-    - "docker compose ls"
-    - "docker compose logs"
-    - "ffprobe"
-    - "git status"
-    - "git log"
-    - "git diff"
-    - "git branch"
-    - "git remote"
-    - "git show"
-    - "pip list"
-    - "pip show"
-    - "python --version"
-    - "node --version"
-    - "go version"
-    - "systemctl status"
-    - "journalctl"
-  allowed_pipe_targets:
-    - "head"
-    - "tail"
-    - "grep"
-    - "wc"
-    - "sort"
-    - "uniq"
-    - "awk"
-    - "sed"
-    - "cut"
-    - "tr"
-`
-
-func getUserConfigPath() string {
+func getConfigPath() string {
 	if homeDir, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(homeDir, ".cc-filter", "config.yaml")
 	}
 	return ""
-}
-
-func mergeRules(base *Rules, override *Rules) *Rules {
-	return &Rules{
-		FileBlocks:   mergeStringSlices(base.FileBlocks, override.FileBlocks),
-		SafeCommands: mergeSafeCommands(base.SafeCommands, override.SafeCommands),
-	}
-}
-
-func mergeSafeCommands(base, override *SafeCommands) *SafeCommands {
-	if base == nil && override == nil {
-		return nil
-	}
-	if base == nil {
-		return override
-	}
-	if override == nil {
-		return base
-	}
-	return &SafeCommands{
-		AllowedCommands:    mergeStringSlices(base.AllowedCommands, override.AllowedCommands),
-		AllowedPipeTargets: mergeStringSlices(base.AllowedPipeTargets, override.AllowedPipeTargets),
-	}
-}
-
-func mergeStringSlices(base, override []string) []string {
-	seen := make(map[string]bool)
-	result := make([]string, 0)
-
-	for _, item := range base {
-		if !seen[item] {
-			seen[item] = true
-			result = append(result, item)
-		}
-	}
-
-	for _, item := range override {
-		if !seen[item] {
-			seen[item] = true
-			result = append(result, item)
-		}
-	}
-
-	return result
 }
 
 // splitPathSegments splits a path into segments by / or \
