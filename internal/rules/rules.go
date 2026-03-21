@@ -13,6 +13,7 @@ import (
 
 type SafeCommands struct {
 	AllowedCommands    []string            `yaml:"allowed_commands"`
+	LocalOnlyCommands  []string            `yaml:"local_only_commands"`
 	AllowedPipeTargets []string            `yaml:"allowed_pipe_targets"`
 	FileReadCommands   []string            `yaml:"file_read_commands"`
 	FileSearchCommands []string            `yaml:"file_search_commands"`
@@ -86,7 +87,8 @@ func argsToStrings(args []*syntax.Word) []string {
 }
 
 // isStmtSafe checks if a single statement (with its redirects) is safe.
-func (r *Rules) isStmtSafe(stmt *syntax.Stmt, isPipeTarget bool) bool {
+// isLocal controls whether local_only_commands are checked (false for SSH).
+func (r *Rules) isStmtSafe(stmt *syntax.Stmt, isPipeTarget bool, isLocal bool) bool {
 	// NOTE Negated = "! cmd" (negate exit code), Coprocess = "coproc cmd" (run as coprocess)
 	// Neither is expected in safe read-only commands, reject to be safe
 	if stmt.Negated || stmt.Coprocess {
@@ -116,7 +118,7 @@ func (r *Rules) isStmtSafe(stmt *syntax.Stmt, isPipeTarget bool) bool {
 		if isPipeTarget {
 			return r.matchesPipeTarget(words)
 		}
-		if r.matchesAllowedCommand(words) {
+		if r.matchesAllowedCommand(words, isLocal) {
 			return true
 		}
 		return r.matchesSafeFileReadCommand(words)
@@ -124,9 +126,9 @@ func (r *Rules) isStmtSafe(stmt *syntax.Stmt, isPipeTarget bool) bool {
 	case *syntax.BinaryCmd:
 		switch cmd.Op {
 		case syntax.Pipe, syntax.PipeAll:
-			return r.isStmtSafe(cmd.X, isPipeTarget) && r.isStmtSafe(cmd.Y, true)
+			return r.isStmtSafe(cmd.X, isPipeTarget, isLocal) && r.isStmtSafe(cmd.Y, true, isLocal)
 		case syntax.AndStmt, syntax.OrStmt:
-			return r.isStmtSafe(cmd.X, isPipeTarget) && r.isStmtSafe(cmd.Y, isPipeTarget)
+			return r.isStmtSafe(cmd.X, isPipeTarget, isLocal) && r.isStmtSafe(cmd.Y, isPipeTarget, isLocal)
 		default:
 			return false
 		}
@@ -137,8 +139,17 @@ func (r *Rules) isStmtSafe(stmt *syntax.Stmt, isPipeTarget bool) bool {
 	}
 }
 
-// IsCommandSafe checks if a command is safe to auto-approve using shell AST parsing.
-func (r *Rules) IsCommandSafe(command string) bool {
+// IsLocalCommandSafe checks if a local command is safe to auto-approve (includes local_only_commands).
+func (r *Rules) IsLocalCommandSafe(command string) bool {
+	return r.isCommandSafeWith(command, true)
+}
+
+// IsRemoteCommandSafe checks if a command is safe when run via SSH (excludes local_only_commands).
+func (r *Rules) IsRemoteCommandSafe(command string) bool {
+	return r.isCommandSafeWith(command, false)
+}
+
+func (r *Rules) isCommandSafeWith(command string, isLocal bool) bool {
 	if r.SafeCommands == nil {
 		return false
 	}
@@ -155,7 +166,7 @@ func (r *Rules) IsCommandSafe(command string) bool {
 	}
 
 	for _, stmt := range file.Stmts {
-		if !r.isStmtSafe(stmt, false) {
+		if !r.isStmtSafe(stmt, false, isLocal) {
 			return false
 		}
 	}
@@ -181,11 +192,10 @@ func matchesAnyPrefix(words []string, prefixes []string) bool {
 	return false
 }
 
-func (r *Rules) matchesAllowedCommand(words []string) bool {
-	if !matchesAnyPrefix(words, r.SafeCommands.AllowedCommands) {
-		return false
-	}
-	return !r.hasBlockedArgs(words)
+func (r *Rules) matchesAllowedCommand(words []string, isLocal bool) bool {
+	matched := matchesAnyPrefix(words, r.SafeCommands.AllowedCommands) ||
+		(isLocal && matchesAnyPrefix(words, r.SafeCommands.LocalOnlyCommands))
+	return matched && !r.hasBlockedArgs(words)
 }
 
 func (r *Rules) hasBlockedArgs(words []string) bool {
@@ -257,7 +267,7 @@ func (r *Rules) IsSSHCommandSafe(command string) bool {
 	if server == "" || remoteCmd == "" {
 		return false
 	}
-	return r.IsCommandSafe(remoteCmd)
+	return r.IsRemoteCommandSafe(remoteCmd)
 }
 
 func parseSSHCommand(command string) (server, remoteCmd string) {

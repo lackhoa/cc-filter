@@ -53,7 +53,7 @@ func (c *ClaudeHookProcessor) processPreToolUse(input map[string]interface{}) (s
 	// Check if this command should be auto-approved (e.g. safe SSH commands)
 	if toolName == "Bash" {
 		if command, ok := toolInputRaw["command"].(string); ok {
-			if c.rules.IsSSHCommandSafe(command) || c.rules.IsCommandSafe(command) {
+			if c.rules.IsSSHCommandSafe(command) || c.rules.IsLocalCommandSafe(command) {
 				response := map[string]interface{}{
 					"hookSpecificOutput": map[string]interface{}{
 						"hookEventName":      "PreToolUse",
@@ -74,9 +74,9 @@ func (c *ClaudeHookProcessor) processPreToolUse(input map[string]interface{}) (s
 	if shouldBlock {
 		response := map[string]interface{}{
 			"hookSpecificOutput": map[string]interface{}{
-				"hookEventName":             "PreToolUse",
-				"permissionDecision":        "deny",
-				"permissionDecisionReason":  reason,
+				"hookEventName":            "PreToolUse",
+				"permissionDecision":       "deny",
+				"permissionDecisionReason": reason,
 			},
 		}
 		responseJSON, err := json.Marshal(response)
@@ -105,7 +105,7 @@ func (c *ClaudeHookProcessor) shouldBlockTool(toolName string, toolInput map[str
 		if filePath, ok := toolInput["file_path"].(string); ok {
 			return c.rules.ShouldBlockFile(filePath)
 		}
-		
+
 	case "Glob":
 		if pattern, ok := toolInput["pattern"].(string); ok {
 			for _, blockedPattern := range c.rules.FileBlocks {
@@ -114,21 +114,21 @@ func (c *ClaudeHookProcessor) shouldBlockTool(toolName string, toolInput map[str
 				}
 			}
 		}
-		
-	// NOTE(khoa): Bash commands already go through Claude Code's permission
-	// dialog, so the user can approve/deny them directly. No need to block here.
+
+		// NOTE(khoa): Bash commands already go through Claude Code's permission
+		// dialog, so the user can approve/deny them directly. No need to block here.
 	}
-	
+
 	return false, ""
 }
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && 
-		   (s == substr || 
-			len(s) > len(substr) && 
-			(s[:len(substr)] == substr || 
-			 s[len(s)-len(substr):] == substr ||
-			 containsAnywhere(s, substr)))
+	return len(s) >= len(substr) &&
+		(s == substr ||
+			len(s) > len(substr) &&
+				(s[:len(substr)] == substr ||
+					s[len(s)-len(substr):] == substr ||
+					containsAnywhere(s, substr)))
 }
 
 func containsAnywhere(s, substr string) bool {

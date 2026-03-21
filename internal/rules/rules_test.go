@@ -24,9 +24,9 @@ func TestShouldBlockFile(t *testing.T) {
 		{"/home/user/.env", true},
 		{"/home/user/.env.local", true},
 		{"config/secrets.json", true},
-		{"my-secret-file.txt", true},    // matches *secret*
-		{"server.pem", true},            // matches *.pem
-		{"private.key", true},           // matches *.key
+		{"my-secret-file.txt", true}, // matches *secret*
+		{"server.pem", true},         // matches *.pem
+		{"private.key", true},        // matches *.key
 		{"/home/user/config.py", false},
 		{"/home/user/main.go", false},
 		{"README.md", false},
@@ -101,8 +101,8 @@ func TestContainsBlockedPattern(t *testing.T) {
 	}{
 		{".env", true},
 		{"path/to/.env.local", true},
-		{"my-secret-config", true},  // matches *secret*
-		{"server.pem", true},        // matches *.pem
+		{"my-secret-config", true}, // matches *secret*
+		{"server.pem", true},       // matches *.pem
 		{"normal-file.txt", false},
 		{"main.go", false},
 	}
@@ -119,6 +119,7 @@ func safeCommandsRules() *Rules {
 	return &Rules{
 		SafeCommands: &SafeCommands{
 			AllowedCommands:    []string{"ls", "df", "du", "ps", "uptime", "free", "whoami", "hostname", "docker ps", "docker stats", "docker compose ps", "docker compose ls", "ffprobe"},
+			LocalOnlyCommands:  []string{"git pull"},
 			AllowedPipeTargets: []string{"head", "tail", "grep"},
 		},
 	}
@@ -210,6 +211,10 @@ func TestIsSSHCommandSafe(t *testing.T) {
 		{"ssh u6 ls | python", false, "pipe to python"},
 		{"ssh u6 ls | xargs rm", false, "pipe to xargs"},
 		{"ssh u6 ls | tee /etc/passwd", false, "pipe to tee"},
+
+		// Local-only commands: NOT safe via SSH
+		{"ssh u6 git pull", false, "local-only git pull blocked via SSH"},
+		{"ssh u6 git pull origin main", false, "local-only git pull with args blocked via SSH"},
 
 		// Not SSH commands at all
 		{"ls -la", false, "not ssh"},
@@ -306,13 +311,17 @@ func TestIsCommandSafe(t *testing.T) {
 		{"ls | python", false, "pipe to python"},
 		{"ls | xargs rm", false, "pipe to xargs"},
 
+		// Local-only commands: safe locally
+		{"git pull", true, "local-only git pull"},
+		{"git pull origin main", true, "local-only git pull with args"},
+
 		// Edge cases
 		{"", false, "empty"},
 		{"  ", false, "whitespace only"},
 	}
 
 	for _, tt := range tests {
-		safe := r.IsCommandSafe(tt.command)
+		safe := r.IsLocalCommandSafe(tt.command)
 		if safe != tt.safe {
 			t.Errorf("[%s] IsCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
 		}
@@ -321,7 +330,7 @@ func TestIsCommandSafe(t *testing.T) {
 
 func TestIsCommandSafe_NilConfig(t *testing.T) {
 	r := &Rules{SafeCommands: nil}
-	if r.IsCommandSafe("ls") {
+	if r.IsLocalCommandSafe("ls") {
 		t.Error("should return false when SafeCommands is nil")
 	}
 }
@@ -381,7 +390,7 @@ func TestIsCommandSafe_Redirections(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		safe := r.IsCommandSafe(tt.command)
+		safe := r.IsLocalCommandSafe(tt.command)
 		if safe != tt.safe {
 			t.Errorf("[%s] IsCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
 		}
@@ -446,7 +455,7 @@ func TestIsCommandSafe_FileReadCommands(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		safe := r.IsCommandSafe(tt.command)
+		safe := r.IsLocalCommandSafe(tt.command)
 		if safe != tt.safe {
 			t.Errorf("[%s] IsCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
 		}
@@ -497,7 +506,7 @@ func TestIsCommandSafe_BlockedArgs(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		safe := r.IsCommandSafe(tt.command)
+		safe := r.IsLocalCommandSafe(tt.command)
 		if safe != tt.safe {
 			t.Errorf("[%s] IsCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
 		}
