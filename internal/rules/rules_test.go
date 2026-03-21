@@ -453,6 +453,57 @@ func TestIsCommandSafe_FileReadCommands(t *testing.T) {
 	}
 }
 
+func blockedArgsRules() *Rules {
+	return &Rules{
+		SafeCommands: &SafeCommands{
+			AllowedCommands:    []string{"find", "ls"},
+			AllowedPipeTargets: []string{"head", "tail", "grep"},
+			BlockedArgs: map[string][]string{
+				"find": {"-exec", "-execdir", "-delete", "-ok", "-okdir"},
+			},
+		},
+	}
+}
+
+func TestIsCommandSafe_BlockedArgs(t *testing.T) {
+	r := blockedArgsRules()
+
+	tests := []struct {
+		command string
+		safe    bool
+		desc    string
+	}{
+		// Safe: find without dangerous args
+		{"find . -name '*.py'", true, "find by name"},
+		{"find /tmp -type f", true, "find by type"},
+		{"find . -maxdepth 2 -name '*.log'", true, "find with maxdepth"},
+		{"find . -name '*.py' -print", true, "find with print"},
+		{"find . -name '*.py' | head", true, "find piped to head"},
+		{"find . -name '*.py' | grep test", true, "find piped to grep"},
+
+		// Unsafe: find with blocked args
+		{"find . -exec rm {} ;", false, "find with -exec"},
+		{"find . -name '*.tmp' -exec rm {} +", false, "find -exec with +"},
+		{"find . -execdir mv {} /tmp ;", false, "find with -execdir"},
+		{"find . -name '*.tmp' -delete", false, "find with -delete"},
+		{"find . -ok rm {} ;", false, "find with -ok"},
+		{"find . -okdir rm {} ;", false, "find with -okdir"},
+
+		// Safe: ls is allowed and has no blocked args
+		{"ls -la", true, "ls unaffected by blocked_args"},
+
+		// Safe: blocked arg string in a non-blocked command
+		{"ls -exec", true, "ls with -exec is fine (not blocked for ls)"},
+	}
+
+	for _, tt := range tests {
+		safe := r.IsCommandSafe(tt.command)
+		if safe != tt.safe {
+			t.Errorf("[%s] IsCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
+		}
+	}
+}
+
 func TestShouldBlockFileWithSymlinkedPaths(t *testing.T) {
 	r := testRules()
 

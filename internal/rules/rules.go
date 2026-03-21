@@ -12,11 +12,12 @@ import (
 )
 
 type SafeCommands struct {
-	AllowedCommands    []string `yaml:"allowed_commands"`
-	AllowedPipeTargets []string `yaml:"allowed_pipe_targets"`
-	FileReadCommands   []string `yaml:"file_read_commands"`
-	FileSearchCommands []string `yaml:"file_search_commands"`
-	AllowedFiles       []string `yaml:"allowed_files"`
+	AllowedCommands    []string            `yaml:"allowed_commands"`
+	AllowedPipeTargets []string            `yaml:"allowed_pipe_targets"`
+	FileReadCommands   []string            `yaml:"file_read_commands"`
+	FileSearchCommands []string            `yaml:"file_search_commands"`
+	AllowedFiles       []string            `yaml:"allowed_files"`
+	BlockedArgs        map[string][]string `yaml:"blocked_args"`
 }
 
 type Rules struct {
@@ -181,7 +182,27 @@ func matchesAnyPrefix(words []string, prefixes []string) bool {
 }
 
 func (r *Rules) matchesAllowedCommand(words []string) bool {
-	return matchesAnyPrefix(words, r.SafeCommands.AllowedCommands)
+	if !matchesAnyPrefix(words, r.SafeCommands.AllowedCommands) {
+		return false
+	}
+	return !r.hasBlockedArgs(words)
+}
+
+func (r *Rules) hasBlockedArgs(words []string) bool {
+	if r.SafeCommands.BlockedArgs == nil {
+		return false
+	}
+	cmd := words[0]
+	blocked, ok := r.SafeCommands.BlockedArgs[cmd]
+	if !ok {
+		return false
+	}
+	for _, word := range words[1:] {
+		if slices.Contains(blocked, word) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Rules) matchesPipeTarget(words []string) bool {
