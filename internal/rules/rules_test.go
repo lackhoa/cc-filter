@@ -125,7 +125,7 @@ func safeCommandsRules() *Rules {
 	}
 }
 
-func TestIsSSHCommandSafe(t *testing.T) {
+func TestIsLocalCommandSafe_SSH(t *testing.T) {
 	r := safeCommandsRules()
 
 	tests := []struct {
@@ -216,10 +216,8 @@ func TestIsSSHCommandSafe(t *testing.T) {
 		{"ssh u6 git pull", false, "local-only git pull blocked via SSH"},
 		{"ssh u6 git pull origin main", false, "local-only git pull with args blocked via SSH"},
 
-		// Not SSH commands at all
-		{"ls -la", false, "not ssh"},
-		{"echo ssh u6 ls", false, "ssh not at start"},
-		{"", false, "empty"},
+		// Not SSH commands at all (these go through normal command checking)
+		{"echo ssh u6 ls", false, "ssh not at start (echo not allowed)"},
 		{"ssh", false, "ssh alone"},
 		{"ssh u6", false, "ssh with no command"},
 
@@ -228,23 +226,26 @@ func TestIsSSHCommandSafe(t *testing.T) {
 		{"ssh -p 22 u6 ls", false, "ssh with -p flag"},
 		{"ssh -i keyfile u6 ls", false, "ssh with -i flag"},
 
+		// Safe: redirects on the SSH process itself
+		{`ssh apr "ls -la && df -h && uptime" 2>&1`, true, "quoted compound cmd with 2>&1"},
+		{"ssh u6 ls 2>&1", true, "stderr to stdout"},
+		{"ssh u6 ls 2>/dev/null", true, "stderr to /dev/null"},
+		{"ssh u6 ls 2>&1 | grep foo", true, "stderr merge piped to grep"},
+
+		// Unsafe: redirects that write to files
+		{"ssh u6 ls > /tmp/out.txt", false, "redirect stdout to file"},
+		{"ssh u6 ls 2>/tmp/err.log", false, "redirect stderr to file"},
+
 		// Edge cases
 		{"ssh u6  ls -la", true, "extra spaces"},
 		{"ssh u6 ls||rm -rf /", false, "no-space double pipe with dangerous cmd"},
 	}
 
 	for _, tt := range tests {
-		safe := r.IsSSHCommandSafe(tt.command)
+		safe := r.IsLocalCommandSafe(tt.command)
 		if safe != tt.safe {
-			t.Errorf("[%s] IsSSHCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
+			t.Errorf("[%s] IsLocalCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
 		}
-	}
-}
-
-func TestIsSSHCommandSafe_NilConfig(t *testing.T) {
-	r := &Rules{SafeCommands: nil}
-	if r.IsSSHCommandSafe("ssh u6 ls") {
-		t.Error("should return false when SafeCommands is nil")
 	}
 }
 
@@ -332,34 +333,6 @@ func TestIsCommandSafe_NilConfig(t *testing.T) {
 	r := &Rules{SafeCommands: nil}
 	if r.IsLocalCommandSafe("ls") {
 		t.Error("should return false when SafeCommands is nil")
-	}
-}
-
-func TestParseSSHCommand(t *testing.T) {
-	tests := []struct {
-		command   string
-		server    string
-		remoteCmd string
-		desc      string
-	}{
-		{"ssh u6 ls -la", "u6", "ls -la", "basic"},
-		{"ssh u6 docker ps -a", "u6", "docker ps -a", "multi-word command"},
-		{`ssh u6 "ls -la /tmp"`, "u6", "ls -la /tmp", "quoted command"},
-		{`ssh u6 'docker ps'`, "u6", "docker ps", "single-quoted"},
-		{"ssh u6", "", "", "no remote command"},
-		{"ssh -t u6 ls", "", "", "has ssh flags"},
-		{"ssh", "", "", "just ssh"},
-		{"", "", "", "empty"},
-		{"ls -la", "", "", "not ssh"},
-		{"ssh user@host df -h", "user@host", "df -h", "user@host format"},
-	}
-
-	for _, tt := range tests {
-		server, remoteCmd := parseSSHCommand(tt.command)
-		if server != tt.server || remoteCmd != tt.remoteCmd {
-			t.Errorf("[%s] parseSSHCommand(%q) = (%q, %q), want (%q, %q)",
-				tt.desc, tt.command, server, remoteCmd, tt.server, tt.remoteCmd)
-		}
 	}
 }
 

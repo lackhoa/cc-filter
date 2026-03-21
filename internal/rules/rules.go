@@ -121,6 +121,9 @@ func (r *Rules) isStmtSafe(stmt *syntax.Stmt, isPipeTarget bool, isLocal bool) b
 		if r.matchesAllowedCommand(words, isLocal) {
 			return true
 		}
+		if r.matchesSafeSSHCommand(words) {
+			return true
+		}
 		return r.matchesSafeFileReadCommand(words)
 
 	case *syntax.BinaryCmd:
@@ -262,45 +265,19 @@ func matchesAnyFilePattern(basename string, patterns []string) bool {
 	return false
 }
 
-func (r *Rules) IsSSHCommandSafe(command string) bool {
-	server, remoteCmd := parseSSHCommand(command)
-	if server == "" || remoteCmd == "" {
+// matchesSafeSSHCommand checks if a command is an SSH invocation with a safe remote command.
+// Rejects SSH with flags (e.g. -t, -p) for safety.
+func (r *Rules) matchesSafeSSHCommand(words []string) bool {
+	// NOTE need at least: ssh <host> <command>
+	if words[0] != "ssh" || len(words) < 3 {
 		return false
 	}
+	if strings.HasPrefix(words[1], "-") {
+		return false
+	}
+	// NOTE SSH concatenates remaining args with spaces for the remote shell
+	remoteCmd := strings.Join(words[2:], " ")
 	return r.IsRemoteCommandSafe(remoteCmd)
-}
-
-func parseSSHCommand(command string) (server, remoteCmd string) {
-	command = strings.TrimSpace(command)
-	if !strings.HasPrefix(command, "ssh ") {
-		return "", ""
-	}
-
-	rest := strings.TrimSpace(command[4:])
-
-	// First token is the server (must not start with -)
-	spaceIdx := strings.IndexAny(rest, " \t")
-	if spaceIdx == -1 {
-		return "", ""
-	}
-
-	server = rest[:spaceIdx]
-	if strings.HasPrefix(server, "-") {
-		// SSH flags not supported — fall through to normal permission system
-		return "", ""
-	}
-
-	remoteCmd = strings.TrimSpace(rest[spaceIdx:])
-
-	// Strip outer quotes if the entire remote command is quoted
-	if len(remoteCmd) >= 2 {
-		if (remoteCmd[0] == '"' && remoteCmd[len(remoteCmd)-1] == '"') ||
-			(remoteCmd[0] == '\'' && remoteCmd[len(remoteCmd)-1] == '\'') {
-			remoteCmd = remoteCmd[1 : len(remoteCmd)-1]
-		}
-	}
-
-	return server, remoteCmd
 }
 
 func LoadRules() (*Rules, error) {
