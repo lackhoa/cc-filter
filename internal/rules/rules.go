@@ -182,7 +182,7 @@ func matchesAnyPrefix(words []string, prefixes []string) bool {
 		if len(words) >= len(prefixWords) {
 			match := true
 			for i, pw := range prefixWords {
-				if words[i] != pw {
+				if matched, _ := filepath.Match(pw, words[i]); !matched {
 					match = false
 					break
 				}
@@ -195,9 +195,46 @@ func matchesAnyPrefix(words []string, prefixes []string) bool {
 	return false
 }
 
+// HACK: docker compose accepts global flags between "compose" and the subcommand
+// (e.g. "docker compose -p myproject ps"), but our prefix matching is positional.
+// We strip known global flags so "docker compose -p myproject ps" matches "docker compose ps".
+func stripDockerComposeGlobalFlags(words []string) []string {
+	if len(words) < 3 || words[0] != "docker" || words[1] != "compose" {
+		return words
+	}
+
+	// NOTE: these global flags consume the next argument as their value
+	flagsWithValue := map[string]bool{
+		"-p": true, "--project-name": true,
+		"-f": true, "--file": true,
+		"--project-directory": true,
+		"--env-file":          true,
+		"--profile":           true,
+		"--progress":          true,
+		"--ansi":              true,
+	}
+
+	result := []string{"docker", "compose"}
+	i := 2
+	for i < len(words) {
+		if flagsWithValue[words[i]] {
+			i += 2 // skip flag and its value
+		} else if strings.HasPrefix(words[i], "-") {
+			i++ // skip boolean flags (e.g. --dry-run, --verbose)
+		} else {
+			// reached the subcommand — keep it and everything after
+			result = append(result, words[i:]...)
+			break
+		}
+	}
+	return result
+}
+
 func (r *Rules) matchesAllowedCommand(words []string, isLocal bool) bool {
-	matched := matchesAnyPrefix(words, r.SafeCommands.AllowedCommands) ||
-		(isLocal && matchesAnyPrefix(words, r.SafeCommands.LocalOnlyCommands))
+	normalized := stripDockerComposeGlobalFlags(words)
+	matched := matchesAnyPrefix(normalized, r.SafeCommands.AllowedCommands) ||
+		(isLocal && matchesAnyPrefix(normalized, r.SafeCommands.LocalOnlyCommands))
+	// NOTE: check blocked args against original words, not normalized
 	return matched && !r.hasBlockedArgs(words)
 }
 

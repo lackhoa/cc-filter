@@ -118,7 +118,7 @@ func TestContainsBlockedPattern(t *testing.T) {
 func safeCommandsRules() *Rules {
 	return &Rules{
 		SafeCommands: &SafeCommands{
-			AllowedCommands:    []string{"ls", "df", "du", "ps", "uptime", "free", "whoami", "hostname", "docker ps", "docker stats", "docker compose ps", "docker compose ls", "ffprobe"},
+			AllowedCommands:    []string{"ls", "df", "du", "ps", "uptime", "free", "whoami", "hostname", "docker ps", "docker stats", "docker compose ps", "docker compose ls", "ffprobe", "python *ralph_*"},
 			LocalOnlyCommands:  []string{"git pull"},
 			AllowedPipeTargets: []string{"head", "tail", "grep"},
 		},
@@ -152,6 +152,10 @@ func TestIsLocalCommandSafe_SSH(t *testing.T) {
 		{"ssh u6 docker stats --no-stream", true, "docker stats"},
 		{"ssh u6 docker compose ps", true, "docker compose ps"},
 		{"ssh u6 docker compose ls", true, "docker compose ls"},
+		{"ssh u6 docker compose -p myproject ps", true, "docker compose -p flag"},
+		{`ssh u6 "docker compose -p fd2-client-staging ps"`, true, "docker compose -p quoted"},
+		{"ssh u6 docker compose -f docker-compose.prod.yml ps", true, "docker compose -f flag"},
+		{"ssh u6 docker compose -p myproject -f prod.yml ps", true, "docker compose multiple global flags"},
 
 		// Safe: different server names
 		{"ssh avo ls -la", true, "different server"},
@@ -272,6 +276,8 @@ func TestIsCommandSafe(t *testing.T) {
 		{"docker stats --no-stream", true, "docker stats"},
 		{"docker compose ps", true, "docker compose ps"},
 		{"docker compose ls", true, "docker compose ls"},
+		{"docker compose -p myproject ps", true, "docker compose -p local"},
+		{"docker compose -p myproject -f prod.yml ps", true, "docker compose multi flags local"},
 
 		// Safe: with pipes
 		{"ls -la | head", true, "pipe to head"},
@@ -311,6 +317,13 @@ func TestIsCommandSafe(t *testing.T) {
 		{"ls | bash", false, "pipe to bash"},
 		{"ls | python", false, "pipe to python"},
 		{"ls | xargs rm", false, "pipe to xargs"},
+
+		// Glob patterns in allowed_commands
+		{"python ~/notes/scripts/ralph_query_db.py \"SELECT 1\"", true, "ralph script"},
+		{"python ~/notes/scripts/ralph_query_db.py \"SELECT 1\" 2>&1 | head -30", true, "ralph script with pipe"},
+		{"python C:/Users/vodan/notes/scripts/ralph_python.py -c \"print(1)\"", true, "ralph script windows path"},
+		{"python script.py", false, "non-ralph python script"},
+		{"python", false, "bare python"},
 
 		// Local-only commands: safe locally
 		{"git pull", true, "local-only git pull"},
