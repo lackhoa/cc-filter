@@ -106,15 +106,6 @@ func (c *ClaudeHookProcessor) shouldBlockTool(toolName string, toolInput map[str
 			return c.rules.ShouldBlockFile(filePath)
 		}
 
-	case "Glob":
-		if pattern, ok := toolInput["pattern"].(string); ok {
-			for _, blockedPattern := range c.rules.FileBlocks {
-				if contains(pattern, blockedPattern) {
-					return true, "Pattern may expose sensitive files: " + pattern
-				}
-			}
-		}
-
 		// NOTE(khoa): Bash commands already go through Claude Code's permission
 		// dialog, so the user can approve/deny them directly. No need to block here.
 	}
