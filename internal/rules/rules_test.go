@@ -499,6 +499,63 @@ func TestIsCommandSafe_BlockedArgs(t *testing.T) {
 	}
 }
 
+func allowedArgsRules() *Rules {
+	return &Rules{
+		SafeCommands: &SafeCommands{
+			AllowedCommands:    []string{"curl", "ls"},
+			AllowedPipeTargets: []string{"head", "tail", "grep"},
+			AllowedArgs: map[string][]string{
+				"curl": {"-s", "--silent", "-S", "--show-error", "-o", "--output", "-L", "--location", "-H", "--header", "-k", "--insecure", "-f", "--fail", "-v", "--verbose", "-I", "--head", "--connect-timeout", "--max-time", "--retry", "--retry-delay"},
+			},
+		},
+	}
+}
+
+func TestIsCommandSafe_AllowedArgs(t *testing.T) {
+	r := allowedArgsRules()
+
+	tests := []struct {
+		command string
+		safe    bool
+		desc    string
+	}{
+		// Safe: curl with allowed flags
+		{"curl http://localhost:9200/metrics", true, "curl no flags"},
+		{"curl -s http://localhost:9200/metrics", true, "curl -s"},
+		{"curl --silent http://localhost:9200/metrics", true, "curl --silent"},
+		{"curl -sL http://example.com", false, "curl combined flags not in list"},
+		{"curl -s -L http://example.com", true, "curl -s -L separate"},
+		{"curl -s -o /tmp/out.json http://example.com", true, "curl -s -o"},
+		{"curl -s -H 'Authorization: Bearer xxx' http://example.com", true, "curl with header"},
+		{"curl -s --connect-timeout 5 http://example.com", true, "curl with timeout"},
+		{"curl -s http://localhost:9200/metrics | head", true, "curl piped to head"},
+		{"curl -I http://example.com", true, "curl HEAD request"},
+		{"curl --head http://example.com", true, "curl --head"},
+
+		// Unsafe: curl with disallowed flags (write operations)
+		{"curl -X POST http://example.com", false, "curl -X POST"},
+		{"curl --request DELETE http://example.com", false, "curl --request"},
+		{"curl -d 'data' http://example.com", false, "curl -d"},
+		{"curl --data 'data' http://example.com", false, "curl --data"},
+		{"curl --data-raw 'data' http://example.com", false, "curl --data-raw"},
+		{"curl --data-binary @file http://example.com", false, "curl --data-binary"},
+		{"curl --upload-file file.txt http://example.com", false, "curl --upload-file"},
+		{"curl -F 'file=@upload.txt' http://example.com", false, "curl -F form upload"},
+		{"curl -T file.txt http://example.com", false, "curl -T upload"},
+
+		// Safe: ls is not in allowed_args, so any flags work (no restriction)
+		{"ls -la", true, "ls unaffected by allowed_args"},
+		{"ls -exec", true, "ls with any flag (no allowed_args for ls)"},
+	}
+
+	for _, tt := range tests {
+		safe := r.IsLocalCommandSafe(tt.command)
+		if safe != tt.safe {
+			t.Errorf("[%s] IsCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
+		}
+	}
+}
+
 func TestShouldBlockFileWithSymlinkedPaths(t *testing.T) {
 	r := testRules()
 

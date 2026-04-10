@@ -19,6 +19,7 @@ type SafeCommands struct {
 	FileSearchCommands []string            `yaml:"file_search_commands"`
 	AllowedFiles       []string            `yaml:"allowed_files"`
 	BlockedArgs        map[string][]string `yaml:"blocked_args"`
+	AllowedArgs        map[string][]string `yaml:"allowed_args"`
 }
 
 type Rules struct {
@@ -234,8 +235,8 @@ func (r *Rules) matchesAllowedCommand(words []string, isLocal bool) bool {
 	normalized := stripDockerComposeGlobalFlags(words)
 	matched := matchesAnyPrefix(normalized, r.SafeCommands.AllowedCommands) ||
 		(isLocal && matchesAnyPrefix(normalized, r.SafeCommands.LocalOnlyCommands))
-	// NOTE: check blocked args against original words, not normalized
-	return matched && !r.hasBlockedArgs(words)
+	// NOTE: check blocked/allowed args against original words, not normalized
+	return matched && !r.hasBlockedArgs(words) && !r.hasDisallowedArgs(words)
 }
 
 func (r *Rules) hasBlockedArgs(words []string) bool {
@@ -249,6 +250,27 @@ func (r *Rules) hasBlockedArgs(words []string) bool {
 	}
 	for _, word := range words[1:] {
 		if slices.Contains(blocked, word) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOnlyAllowedArgs returns true if the command has an allowed_args entry
+// and all flag-like arguments (starting with "-") are in the allow list.
+// Non-flag arguments (URLs, paths, etc.) are always permitted.
+// Returns false (not restricted) if the command has no allowed_args entry.
+func (r *Rules) hasDisallowedArgs(words []string) bool {
+	if r.SafeCommands.AllowedArgs == nil {
+		return false
+	}
+	cmd := words[0]
+	allowed, ok := r.SafeCommands.AllowedArgs[cmd]
+	if !ok {
+		return false
+	}
+	for _, word := range words[1:] {
+		if strings.HasPrefix(word, "-") && !slices.Contains(allowed, word) {
 			return true
 		}
 	}
