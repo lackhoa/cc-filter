@@ -120,7 +120,7 @@ func TestContainsBlockedPattern(t *testing.T) {
 func safeCommandsRules() *Rules {
 	return &Rules{
 		SafeCommands: &SafeCommands{
-			AllowedCommands:    []string{"ls", "df", "du", "ps", "uptime", "free", "whoami", "hostname", "docker ps", "docker stats", "docker compose ps", "docker compose ls", "ffprobe", "python *ralph_*"},
+			Prefixes:    []string{"ls", "df", "du", "ps", "uptime", "free", "whoami", "hostname", "docker ps", "docker stats", "docker compose ps", "docker compose ls", "ffprobe", "python *ralph_*"},
 			LocalOnlyCommands:  []string{"git pull"},
 			AllowedPipeTargets: []string{"head", "tail", "grep"},
 		},
@@ -441,7 +441,7 @@ func TestIsCommandSafe_Redirections(t *testing.T) {
 func fileReadRules() *Rules {
 	return &Rules{
 		SafeCommands: &SafeCommands{
-			AllowedCommands:    []string{"ls", "df"},
+			Prefixes:    []string{"ls", "df"},
 			AllowedPipeTargets: []string{"head", "tail", "grep"},
 			FileReadCommands:   []string{"cat", "tail", "head"},
 			FileSearchCommands: []string{"grep"},
@@ -506,10 +506,10 @@ func TestIsCommandSafe_FileReadCommands(t *testing.T) {
 func blockedArgsRules() *Rules {
 	return &Rules{
 		SafeCommands: &SafeCommands{
-			AllowedCommands:    []string{"find", "ls"},
+			Prefixes:           []string{"ls"},
 			AllowedPipeTargets: []string{"head", "tail", "grep"},
-			BlockedArgs: map[string][]string{
-				"find": {"-exec", "-execdir", "-delete", "-ok", "-okdir"},
+			ComplexCommands: []CommandRule{
+				{Prefix: "find", BlockedArgs: []string{"-exec", "-execdir", "-delete", "-ok", "-okdir"}},
 			},
 		},
 	}
@@ -557,10 +557,10 @@ func TestIsCommandSafe_BlockedArgs(t *testing.T) {
 func allowedArgsRules() *Rules {
 	return &Rules{
 		SafeCommands: &SafeCommands{
-			AllowedCommands:    []string{"curl", "ls"},
+			Prefixes:           []string{"ls"},
 			AllowedPipeTargets: []string{"head", "tail", "grep"},
-			AllowedArgs: map[string][]string{
-				"curl": {"-s", "--silent", "-S", "--show-error", "-o", "--output", "-L", "--location", "-H", "--header", "-k", "--insecure", "-f", "--fail", "-v", "--verbose", "-I", "--head", "--connect-timeout", "--max-time", "--retry", "--retry-delay"},
+			ComplexCommands: []CommandRule{
+				{Prefix: "curl", AllowedArgs: []string{"-s", "--silent", "-S", "--show-error", "-o", "--output", "-L", "--location", "-H", "--header", "-k", "--insecure", "-f", "--fail", "-v", "--verbose", "-I", "--head", "--connect-timeout", "--max-time", "--retry", "--retry-delay"}},
 			},
 		},
 	}

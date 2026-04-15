@@ -12,15 +12,20 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
+type CommandRule struct {
+	Prefix      string   `yaml:"prefix"`
+	BlockedArgs []string `yaml:"blocked_args,omitempty"`
+	AllowedArgs []string `yaml:"allowed_args,omitempty"`
+}
+
 type SafeCommands struct {
-	AllowedCommands    []string            `yaml:"allowed_commands"`
-	LocalOnlyCommands  []string            `yaml:"local_only_commands"`
-	AllowedPipeTargets []string            `yaml:"allowed_pipe_targets"`
-	FileReadCommands   []string            `yaml:"file_read_commands"`
-	FileSearchCommands []string            `yaml:"file_search_commands"`
-	AllowedFiles       []string            `yaml:"allowed_files"`
-	BlockedArgs        map[string][]string `yaml:"blocked_args"`
-	AllowedArgs        map[string][]string `yaml:"allowed_args"`
+	Prefixes          []string      `yaml:"prefixes"`
+	ComplexCommands   []CommandRule `yaml:"complex_commands,omitempty"`
+	LocalOnlyCommands []string      `yaml:"local_only_commands"`
+	AllowedPipeTargets []string      `yaml:"allowed_pipe_targets"`
+	FileReadCommands   []string      `yaml:"file_read_commands"`
+	FileSearchCommands []string      `yaml:"file_search_commands"`
+	AllowedFiles       []string      `yaml:"allowed_files"`
 }
 
 type Rules struct {
@@ -238,45 +243,32 @@ func matchFlagSkip(words []string, wordIdx int, pattern []string, patternIdx int
 }
 
 func (r *Rules) matchesAllowedCommand(words []string, isLocal bool) bool {
-	matched := matchesAnyPrefix(words, r.SafeCommands.AllowedCommands) ||
-		(isLocal && matchesAnyPrefix(words, r.SafeCommands.LocalOnlyCommands))
-	return matched && !r.hasBlockedArgs(words) && !r.hasDisallowedArgs(words)
-}
-
-func (r *Rules) hasBlockedArgs(words []string) bool {
-	if r.SafeCommands.BlockedArgs == nil {
-		return false
+	if matchesAnyPrefix(words, r.SafeCommands.Prefixes) {
+		return true
 	}
-	cmd := words[0]
-	blocked, ok := r.SafeCommands.BlockedArgs[cmd]
-	if !ok {
-		return false
+	if isLocal && matchesAnyPrefix(words, r.SafeCommands.LocalOnlyCommands) {
+		return true
 	}
-	for _, word := range words[1:] {
-		if slices.Contains(blocked, word) {
-			return true
+	for _, cmd := range r.SafeCommands.ComplexCommands {
+		prefixWords := strings.Fields(cmd.Prefix)
+		if !matchesPrefixWithFlagSkip(words, prefixWords) {
+			continue
 		}
-	}
-	return false
-}
-
-// hasOnlyAllowedArgs returns true if the command has an allowed_args entry
-// and all flag-like arguments (starting with "-") are in the allow list.
-// Non-flag arguments (URLs, paths, etc.) are always permitted.
-// Returns false (not restricted) if the command has no allowed_args entry.
-func (r *Rules) hasDisallowedArgs(words []string) bool {
-	if r.SafeCommands.AllowedArgs == nil {
-		return false
-	}
-	cmd := words[0]
-	allowed, ok := r.SafeCommands.AllowedArgs[cmd]
-	if !ok {
-		return false
-	}
-	for _, word := range words[1:] {
-		if strings.HasPrefix(word, "-") && !slices.Contains(allowed, word) {
-			return true
+		if len(cmd.BlockedArgs) > 0 {
+			for _, word := range words {
+				if slices.Contains(cmd.BlockedArgs, word) {
+					return false
+				}
+			}
 		}
+		if len(cmd.AllowedArgs) > 0 {
+			for _, word := range words[1:] {
+				if strings.HasPrefix(word, "-") && !slices.Contains(cmd.AllowedArgs, word) {
+					return false
+				}
+			}
+		}
+		return true
 	}
 	return false
 }
