@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -23,8 +24,9 @@ type SafeCommands struct {
 }
 
 type Rules struct {
-	FileBlocks   []string      `yaml:"file_blocks"`
-	SafeCommands *SafeCommands `yaml:"safe_commands"`
+	FileBlocks       []string      `yaml:"file_blocks"`
+	AutoApprovePaths []string      `yaml:"auto_approve_paths"`
+	SafeCommands     *SafeCommands `yaml:"safe_commands"`
 }
 
 // wordToString extracts a plain string from a syntax.Word.
@@ -125,6 +127,9 @@ func (r *Rules) isStmtSafe(stmt *syntax.Stmt, isPipeTarget bool, isLocal bool) b
 		if r.matchesSafeSSHCommand(words) {
 			return true
 		}
+		if r.matchesSafeScpCommand(words) {
+			return true
+		}
 		return r.matchesSafeFileReadCommand(words)
 
 	case *syntax.BinaryCmd:
@@ -180,62 +185,61 @@ func (r *Rules) isCommandSafeWith(command string, isLocal bool) bool {
 func matchesAnyPrefix(words []string, prefixes []string) bool {
 	for _, prefix := range prefixes {
 		prefixWords := strings.Fields(prefix)
-		if len(words) >= len(prefixWords) {
-			match := true
-			for i, pw := range prefixWords {
-				if matched, _ := filepath.Match(pw, words[i]); !matched {
-					match = false
-					break
-				}
-			}
-			if match {
-				return true
-			}
+		if matchesPrefixWithFlagSkip(words, prefixWords) {
+			return true
 		}
 	}
 	return false
 }
 
-// HACK: docker compose accepts global flags between "compose" and the subcommand
-// (e.g. "docker compose -p myproject ps"), but our prefix matching is positional.
-// We strip known global flags so "docker compose -p myproject ps" matches "docker compose ps".
-func stripDockerComposeGlobalFlags(words []string) []string {
-	if len(words) < 3 || words[0] != "docker" || words[1] != "compose" {
-		return words
+// matchesPrefixWithFlagSkip matches pattern tokens against command tokens in order,
+// skipping over flag-like tokens (starting with "-") and their values.
+// After all pattern tokens are matched, remaining command tokens are ignored (prefix match).
+//
+// Example: "docker compose -f prod.yml ps -a" against pattern "docker compose ps"
+//
+//	word            pattern token   lastWasFlag   action
+//	"docker"        "docker"        false         matches → advance both
+//	"compose"       "compose"       false         matches → advance both
+//	"-f"            "ps"            false         flag → skip, set lastWasFlag=true
+//	"prod.yml"      "ps"            true          no match, but lastWasFlag → skip as flag value
+//	"ps"            "ps"            false         matches → advance both
+//	(done)                                        all pattern tokens matched → success
+func matchesPrefixWithFlagSkip(words []string, pattern []string) bool {
+	return matchFlagSkip(words, 0, pattern, 0, false)
+}
+
+func matchFlagSkip(words []string, wordIdx int, pattern []string, patternIdx int, lastWasFlag bool) bool {
+	if patternIdx >= len(pattern) {
+		return true
+	}
+	if wordIdx >= len(words) {
+		return false
 	}
 
-	// NOTE: these global flags consume the next argument as their value
-	flagsWithValue := map[string]bool{
-		"-p": true, "--project-name": true,
-		"-f": true, "--file": true,
-		"--project-directory": true,
-		"--env-file":          true,
-		"--profile":           true,
-		"--progress":          true,
-		"--ansi":              true,
+	word := words[wordIdx]
+
+	// Flag token: skip it
+	if strings.HasPrefix(word, "-") {
+		return matchFlagSkip(words, wordIdx+1, pattern, patternIdx, true)
 	}
 
-	result := []string{"docker", "compose"}
-	i := 2
-	for i < len(words) {
-		if flagsWithValue[words[i]] {
-			i += 2 // skip flag and its value
-		} else if strings.HasPrefix(words[i], "-") {
-			i++ // skip boolean flags (e.g. --dry-run, --verbose)
-		} else {
-			// reached the subcommand — keep it and everything after
-			result = append(result, words[i:]...)
-			break
-		}
+	// Non-flag token: try to match against current pattern token
+	if matched, _ := filepath.Match(pattern[patternIdx], word); matched {
+		return matchFlagSkip(words, wordIdx+1, pattern, patternIdx+1, false)
 	}
-	return result
+
+	// Doesn't match. If previous token was a flag, this might be its value — skip it.
+	if lastWasFlag {
+		return matchFlagSkip(words, wordIdx+1, pattern, patternIdx, false)
+	}
+
+	return false
 }
 
 func (r *Rules) matchesAllowedCommand(words []string, isLocal bool) bool {
-	normalized := stripDockerComposeGlobalFlags(words)
-	matched := matchesAnyPrefix(normalized, r.SafeCommands.AllowedCommands) ||
-		(isLocal && matchesAnyPrefix(normalized, r.SafeCommands.LocalOnlyCommands))
-	// NOTE: check blocked/allowed args against original words, not normalized
+	matched := matchesAnyPrefix(words, r.SafeCommands.AllowedCommands) ||
+		(isLocal && matchesAnyPrefix(words, r.SafeCommands.LocalOnlyCommands))
 	return matched && !r.hasBlockedArgs(words) && !r.hasDisallowedArgs(words)
 }
 
@@ -339,6 +343,45 @@ func (r *Rules) matchesSafeSSHCommand(words []string) bool {
 	return r.IsRemoteCommandSafe(remoteCmd)
 }
 
+// matchesSafeScpCommand checks if an scp invocation is a safe download (remote → local).
+// Only allows: scp [safe-flags] remote:path local_path
+func (r *Rules) matchesSafeScpCommand(words []string) bool {
+	if words[0] != "scp" || len(words) < 3 {
+		return false
+	}
+
+	safeBoolFlags := map[string]bool{"-r": true, "-q": true, "-C": true, "-p": true, "-v": true}
+	flagsWithValue := map[string]bool{"-P": true}
+
+	var args []string
+	i := 1
+	for i < len(words) {
+		w := words[i]
+		if !strings.HasPrefix(w, "-") {
+			args = append(args, w)
+			i++
+			continue
+		}
+		if flagsWithValue[w] {
+			i += 2
+			continue
+		}
+		if safeBoolFlags[w] {
+			i++
+			continue
+		}
+		return false
+	}
+
+	if len(args) != 2 {
+		return false
+	}
+
+	source, dest := args[0], args[1]
+	// NOTE only allow download: source must be remote (has ':'), dest must be local (no ':')
+	return strings.Contains(source, ":") && !strings.Contains(dest, ":")
+}
+
 func LoadRules() (*Rules, error) {
 	configPath := getConfigPath()
 	data, err := os.ReadFile(configPath)
@@ -414,6 +457,64 @@ var contentReadingVerbs = []string{
 	"cat", "head", "tail", "less", "more", "type",
 	"grep", "rg", "awk", "sed",
 	"source", "printenv", "export",
+}
+
+// expandHome expands a leading "~" to the current user's home directory.
+// Supports "~", "~/", and "~\" prefixes. Other forms (e.g. "~user/...") pass through.
+func expandHome(path string) string {
+	if len(path) == 0 || path[0] != '~' {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if len(path) == 1 {
+		return home
+	}
+	if path[1] == '/' || path[1] == '\\' {
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
+// normalizePathForCompare returns a canonical form of a path suitable for
+// prefix comparison: absolute-cleaned, forward slashes, lowercased on Windows.
+func normalizePathForCompare(p string) string {
+	p = filepath.Clean(p)
+	p = strings.ReplaceAll(p, "\\", "/")
+	if runtime.GOOS == "windows" {
+		p = strings.ToLower(p)
+	}
+	return p
+}
+
+// IsUnderAutoApprovePath returns true if filePath is strictly inside one of
+// the configured auto_approve_paths directories. Expands "~" and is
+// case-insensitive on Windows. The directory itself is not considered "inside".
+func (r *Rules) IsUnderAutoApprovePath(filePath string) bool {
+	if len(r.AutoApprovePaths) == 0 || filePath == "" {
+		return false
+	}
+
+	absFile, err := filepath.Abs(filePath)
+	if err != nil {
+		return false
+	}
+	normFile := normalizePathForCompare(absFile)
+
+	for _, dir := range r.AutoApprovePaths {
+		expanded := expandHome(dir)
+		absDir, err := filepath.Abs(expanded)
+		if err != nil {
+			continue
+		}
+		normDir := normalizePathForCompare(absDir)
+		if strings.HasPrefix(normFile, normDir+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Rules) ShouldBlockCommand(cmd string) (bool, string) {

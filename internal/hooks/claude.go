@@ -54,42 +54,72 @@ func (c *ClaudeHookProcessor) processPreToolUse(input map[string]interface{}) (s
 	if toolName == "Bash" {
 		if command, ok := toolInputRaw["command"].(string); ok {
 			if c.rules.IsLocalCommandSafe(command) {
-				response := map[string]interface{}{
-					"hookSpecificOutput": map[string]interface{}{
-						"hookEventName":      "PreToolUse",
-						"permissionDecision": "allow",
-					},
-				}
-				responseJSON, err := json.Marshal(response)
-				return string(responseJSON), err
+				return allowDecision()
 			}
 		}
 	}
 
-	// Check if this tool should be blocked
-	shouldBlock, reason := c.shouldBlockTool(toolName, toolInputRaw)
+	// Check if this tool should be blocked (deny wins over auto-approve)
+	if shouldBlock, reason := c.shouldBlockTool(toolName, toolInputRaw); shouldBlock {
+		return denyDecision(reason)
+	}
 
-	// Only intervene if we need to block
-	// Otherwise, defer to default permission system by not including permissionDecision
-	if shouldBlock {
-		response := map[string]interface{}{
-			"hookSpecificOutput": map[string]interface{}{
-				"hookEventName":            "PreToolUse",
-				"permissionDecision":       "deny",
-				"permissionDecisionReason": reason,
-			},
+	// Auto-approve Read/Edit/Write for files under configured directories
+	if filePath := extractFilePath(toolName, toolInputRaw); filePath != "" {
+		if c.rules.IsUnderAutoApprovePath(filePath) {
+			return allowDecision()
 		}
-		responseJSON, err := json.Marshal(response)
-		return string(responseJSON), err
 	}
 
 	// Pass through - let default permission system handle it
+	return passThroughDecision()
+}
+
+// extractFilePath returns the file path for file tools (Read, Edit, Write,
+// MultiEdit, NotebookEdit). Returns "" for tools that don't take a file path.
+func extractFilePath(toolName string, input map[string]interface{}) string {
+	switch toolName {
+	case "Read", "Edit", "Write", "MultiEdit":
+		if p, ok := input["file_path"].(string); ok {
+			return p
+		}
+	case "NotebookEdit":
+		if p, ok := input["notebook_path"].(string); ok {
+			return p
+		}
+	}
+	return ""
+}
+
+func allowDecision() (string, error) {
+	response := map[string]interface{}{
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName":      "PreToolUse",
+			"permissionDecision": "allow",
+		},
+	}
+	responseJSON, err := json.Marshal(response)
+	return string(responseJSON), err
+}
+
+func denyDecision(reason string) (string, error) {
+	response := map[string]interface{}{
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": reason,
+		},
+	}
+	responseJSON, err := json.Marshal(response)
+	return string(responseJSON), err
+}
+
+func passThroughDecision() (string, error) {
 	response := map[string]interface{}{
 		"hookSpecificOutput": map[string]interface{}{
 			"hookEventName": "PreToolUse",
 		},
 	}
-
 	responseJSON, err := json.Marshal(response)
 	return string(responseJSON), err
 }
@@ -100,16 +130,11 @@ func (c *ClaudeHookProcessor) processUserPromptSubmit(input map[string]interface
 }
 
 func (c *ClaudeHookProcessor) shouldBlockTool(toolName string, toolInput map[string]interface{}) (bool, string) {
-	switch toolName {
-	case "Read":
-		if filePath, ok := toolInput["file_path"].(string); ok {
-			return c.rules.ShouldBlockFile(filePath)
-		}
-
-		// NOTE(khoa): Bash commands already go through Claude Code's permission
-		// dialog, so the user can approve/deny them directly. No need to block here.
+	// NOTE(khoa): Bash commands already go through Claude Code's permission
+	// dialog, so the user can approve/deny them directly. No need to block here.
+	if filePath := extractFilePath(toolName, toolInput); filePath != "" {
+		return c.rules.ShouldBlockFile(filePath)
 	}
-
 	return false, ""
 }
 

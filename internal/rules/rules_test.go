@@ -1,6 +1,8 @@
 package rules
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -243,6 +245,59 @@ func TestIsLocalCommandSafe_SSH(t *testing.T) {
 		// Edge cases
 		{"ssh u6  ls -la", true, "extra spaces"},
 		{"ssh u6 ls||rm -rf /", false, "no-space double pipe with dangerous cmd"},
+	}
+
+	for _, tt := range tests {
+		safe := r.IsLocalCommandSafe(tt.command)
+		if safe != tt.safe {
+			t.Errorf("[%s] IsLocalCommandSafe(%q) = %v, want %v", tt.desc, tt.command, safe, tt.safe)
+		}
+	}
+}
+
+func TestIsLocalCommandSafe_SCP(t *testing.T) {
+	r := safeCommandsRules()
+
+	tests := []struct {
+		command string
+		safe    bool
+		desc    string
+	}{
+		// Safe: download (remote → local)
+		{"scp u6:~/file.txt ./local/", true, "basic download"},
+		{"scp u6:/home/user/file.txt /tmp/", true, "download with absolute paths"},
+		{"scp user@host:~/file.txt ./", true, "user@host format"},
+		{"scp avo:~/data/report.csv ~/Downloads/", true, "download to Downloads"},
+
+		// Safe: with allowed flags
+		{"scp -r u6:~/dir ./local/", true, "-r recursive"},
+		{"scp -P 2222 u6:~/file.txt ./", true, "-P port"},
+		{"scp -q u6:~/file.txt ./", true, "-q quiet"},
+		{"scp -C u6:~/file.txt ./", true, "-C compression"},
+		{"scp -p u6:~/file.txt ./", true, "-p preserve times"},
+		{"scp -v u6:~/file.txt ./", true, "-v verbose"},
+		{"scp -r -P 2222 u6:~/dir ./local/", true, "multiple safe flags"},
+
+		// Unsafe: upload (local → remote)
+		{"scp ./local/file.txt u6:~/path/", false, "upload to remote"},
+		{"scp /tmp/data.csv avo:~/data/", false, "upload absolute path"},
+
+		// Unsafe: both remote
+		{"scp u6:~/file.txt avo:~/file.txt", false, "remote to remote"},
+
+		// Unsafe: both local (no ':' in source)
+		{"scp file1 file2", false, "local to local"},
+
+		// Unsafe: dangerous flags
+		{"scp -o StrictHostKeyChecking=no u6:~/file ./", false, "-o flag"},
+		{"scp -i ~/.ssh/key u6:~/file ./", false, "-i flag"},
+		{"scp -F /tmp/config u6:~/file ./", false, "-F flag"},
+		{"scp -S /usr/bin/ssh u6:~/file ./", false, "-S flag"},
+
+		// Unsafe: too few/many args
+		{"scp", false, "bare scp"},
+		{"scp u6:~/file", false, "missing destination"},
+		{"scp u6:~/a u6:~/b ./local/", false, "three non-flag args"},
 	}
 
 	for _, tt := range tests {
@@ -555,6 +610,67 @@ func TestIsCommandSafe_AllowedArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestIsUnderAutoApprovePath(t *testing.T) {
+	// Pick an absolute root that works on both Windows and Unix.
+	// filepath.Abs of "/tmp/..." on Windows yields "C:\tmp\...".
+	r := &Rules{
+		AutoApprovePaths: []string{
+			"/tmp/cc-filter-test-approved",
+			"/tmp/cc-filter-test-notes",
+		},
+	}
+
+	tests := []struct {
+		path     string
+		expected bool
+		desc     string
+	}{
+		{"/tmp/cc-filter-test-approved/foo.go", true, "file inside approved dir"},
+		{"/tmp/cc-filter-test-approved/sub/bar.go", true, "file in subdir"},
+		{"/tmp/cc-filter-test-approved/a/b/c/d.txt", true, "deeply nested file"},
+		{"/tmp/cc-filter-test-notes/readme.md", true, "file inside second approved dir"},
+
+		{"/tmp/cc-filter-test-other/foo.go", false, "file outside approved dirs"},
+		{"/tmp/cc-filter-test-approved", false, "directory itself (not strictly inside)"},
+		{"/tmp/cc-filter-test-approved-fake/foo.go", false, "prefix collision does not match"},
+		{"", false, "empty path"},
+	}
+
+	for _, tt := range tests {
+		got := r.IsUnderAutoApprovePath(tt.path)
+		if got != tt.expected {
+			t.Errorf("[%s] IsUnderAutoApprovePath(%q) = %v, want %v",
+				tt.desc, tt.path, got, tt.expected)
+		}
+	}
+}
+
+func TestIsUnderAutoApprovePath_EmptyConfig(t *testing.T) {
+	r := &Rules{}
+	if r.IsUnderAutoApprovePath("/tmp/anything/foo.go") {
+		t.Error("empty AutoApprovePaths should never match")
+	}
+}
+
+func TestIsUnderAutoApprovePath_HomeExpansion(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home dir")
+	}
+	r := &Rules{AutoApprovePaths: []string{"~/cc-filter-test-home"}}
+
+	inside := filepath.Join(home, "cc-filter-test-home", "a.txt")
+	outside := filepath.Join(home, "cc-filter-test-other", "a.txt")
+
+	if !r.IsUnderAutoApprovePath(inside) {
+		t.Errorf("expected %q to be under ~/cc-filter-test-home", inside)
+	}
+	if r.IsUnderAutoApprovePath(outside) {
+		t.Errorf("expected %q NOT to be under ~/cc-filter-test-home", outside)
+	}
+}
+
 
 func TestShouldBlockFileWithSymlinkedPaths(t *testing.T) {
 	r := testRules()
