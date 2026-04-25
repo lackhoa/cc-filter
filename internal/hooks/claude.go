@@ -77,6 +77,7 @@ func (c *ClaudeHookProcessor) processPreToolUse(input map[string]interface{}) (s
 
 // extractFilePath returns the file path for file tools (Read, Edit, Write,
 // MultiEdit, NotebookEdit). Returns "" for tools that don't take a file path.
+// Used for auto-approve, which only applies to single-file tools.
 func extractFilePath(toolName string, input map[string]interface{}) string {
 	switch toolName {
 	case "Read", "Edit", "Write", "MultiEdit":
@@ -89,6 +90,29 @@ func extractFilePath(toolName string, input map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+// extractCheckablePaths returns all path/glob inputs that should be matched
+// against file_blocks. Covers single-file tools plus Grep, whose path/glob
+// fields can also expose blocked file content. Glob is intentionally not
+// covered — listing filenames is not harmful (see commit e78da66).
+func extractCheckablePaths(toolName string, input map[string]interface{}) []string {
+	var paths []string
+	add := func(key string) {
+		if v, ok := input[key].(string); ok && v != "" {
+			paths = append(paths, v)
+		}
+	}
+	switch toolName {
+	case "Read", "Edit", "Write", "MultiEdit":
+		add("file_path")
+	case "NotebookEdit":
+		add("notebook_path")
+	case "Grep":
+		add("path")
+		add("glob")
+	}
+	return paths
 }
 
 func allowDecision() (string, error) {
@@ -132,8 +156,10 @@ func (c *ClaudeHookProcessor) processUserPromptSubmit(input map[string]interface
 func (c *ClaudeHookProcessor) shouldBlockTool(toolName string, toolInput map[string]interface{}) (bool, string) {
 	// NOTE(khoa): Bash commands already go through Claude Code's permission
 	// dialog, so the user can approve/deny them directly. No need to block here.
-	if filePath := extractFilePath(toolName, toolInput); filePath != "" {
-		return c.rules.ShouldBlockFile(filePath)
+	for _, p := range extractCheckablePaths(toolName, toolInput) {
+		if blocked, reason := c.rules.ShouldBlockFile(p); blocked {
+			return true, reason
+		}
 	}
 	return false, ""
 }
