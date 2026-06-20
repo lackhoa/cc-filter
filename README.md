@@ -64,6 +64,22 @@ Move-Item cc-filter.exe C:\Windows\System32\
 
 Alternatively, you can download `cc-filter-windows-amd64.exe` from the [releases page](https://github.com/wissem/cc-filter/releases/latest) and place it in a directory that's in your PATH.
 
+### Build from source
+
+Requires [Go](https://go.dev/dl/) (see `go.mod` for the minimum version). The `build.sh` script runs the
+tests, builds the binary, and installs it to both locations cc-filter expects:
+
+```bash
+./build.sh                # test, build, install
+./build.sh --skip-tests   # skip the test run (faster rebuilds)
+```
+
+It installs to:
+1. **`$GOBIN`** (or `$GOPATH/bin`) — on your PATH, used by the Claude Code hook (`command: cc-filter`).
+2. **`~/.cc-filter/`** — where the opencode bridge plugin looks for the binary first.
+
+Works on git-bash (Windows), macOS, and Linux. To build manually instead: `go install .`.
+
 ## Usage with Claude Code Hooks
 
 ### 1. Create a Claude Code configuration
