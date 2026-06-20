@@ -224,17 +224,18 @@ func matchFlagSkip(words []string, wordIdx int, pattern []string, patternIdx int
 
 	word := words[wordIdx]
 
-	// Flag token: skip it
-	if strings.HasPrefix(word, "-") {
-		return matchFlagSkip(words, wordIdx+1, pattern, patternIdx, true)
-	}
-
-	// Non-flag token: try to match against current pattern token
+	// Try to match current word against current pattern token first — this lets
+	// flag tokens in the pattern (e.g. "crontab -l") match literal flags in the command.
 	if matched, _ := filepath.Match(pattern[patternIdx], word); matched {
 		return matchFlagSkip(words, wordIdx+1, pattern, patternIdx+1, false)
 	}
 
-	// Doesn't match. If previous token was a flag, this might be its value — skip it.
+	// Flag word that didn't match the pattern: skip it (command may include extra flags).
+	if strings.HasPrefix(word, "-") {
+		return matchFlagSkip(words, wordIdx+1, pattern, patternIdx, true)
+	}
+
+	// Non-flag word that didn't match. If previous token was a flag, this might be its value — skip it.
 	if lastWasFlag {
 		return matchFlagSkip(words, wordIdx+1, pattern, patternIdx, false)
 	}
@@ -405,6 +406,9 @@ func splitPathSegments(path string) []string {
 // containsBlockedPattern checks if text contains any of the file_blocks patterns
 func (r *Rules) containsBlockedPattern(text string) (bool, string) {
 	textLower := strings.ToLower(text)
+	// Normalize backslashes to forward slashes so multi-segment patterns like
+	// "dragonfly_setup/config.yaml" match Windows paths that use "\".
+	textNorm := strings.ReplaceAll(textLower, "\\", "/")
 
 	for _, pattern := range r.FileBlocks {
 		patternLower := strings.ToLower(pattern)
@@ -428,7 +432,8 @@ func (r *Rules) containsBlockedPattern(text string) (bool, string) {
 				}
 			}
 		} else {
-			if strings.Contains(textLower, patternLower) {
+			patternNorm := strings.ReplaceAll(patternLower, "\\", "/")
+			if strings.Contains(textNorm, patternNorm) {
 				return true, pattern
 			}
 		}

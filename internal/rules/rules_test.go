@@ -12,6 +12,7 @@ func testRules() *Rules {
 			".env", ".env.local", "secrets.json", "credentials.json",
 			"*.key", "*.pem", "*secret*",
 			"secrets", "secrets.*",
+			"dragonfly_setup/config.yaml",
 		},
 	}
 }
@@ -32,6 +33,11 @@ func TestShouldBlockFile(t *testing.T) {
 		{"/home/user/config.py", false},
 		{"/home/user/main.go", false},
 		{"README.md", false},
+		// multi-segment pattern matches both slash directions
+		{"/home/user/dragonfly_setup/config.yaml", true},
+		{`C:\Users\vodan\dragonfly_setup\config.yaml`, true},
+		// bare config.yaml elsewhere is not blocked
+		{"/home/user/other/config.yaml", false},
 	}
 
 	for _, tt := range tests {

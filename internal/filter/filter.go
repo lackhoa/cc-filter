@@ -21,6 +21,7 @@ func New() (*Filter, error) {
 
 	registry := hooks.NewRegistry()
 	registry.Register(hooks.NewClaudeHookProcessor(r))
+	registry.Register(hooks.NewOpencodeHookProcessor(r))
 
 	return &Filter{
 		rules:        r,
