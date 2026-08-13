@@ -149,8 +149,10 @@ func passThroughDecision() (string, error) {
 }
 
 func (c *ClaudeHookProcessor) processUserPromptSubmit(input map[string]interface{}) (string, error) {
-	prompt, _ := input["prompt"].(string)
-	return prompt, nil
+	// Claude Code APPENDS UserPromptSubmit stdout to context (it can't replace
+	// the prompt), so echoing the prompt back just duplicates it in context.
+	// Output nothing.
+	return "", nil
 }
 
 func (c *ClaudeHookProcessor) shouldBlockTool(toolName string, toolInput map[string]interface{}) (bool, string) {
