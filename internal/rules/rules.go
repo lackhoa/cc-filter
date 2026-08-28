@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -28,10 +29,22 @@ type SafeCommands struct {
 	AllowedFiles       []string      `yaml:"allowed_files"`
 }
 
+// CommandBlock denies commands matching Pattern (Go regexp, matched against the
+// raw command string — so it also catches the command inside pipelines, ssh
+// invocations, and `cd x && ...` compounds). Reason is returned in the deny
+// message so the agent knows what to do instead.
+type CommandBlock struct {
+	Pattern string `yaml:"pattern"`
+	Reason  string `yaml:"reason"`
+
+	compiled *regexp.Regexp
+}
+
 type Rules struct {
-	FileBlocks       []string      `yaml:"file_blocks"`
-	AutoApprovePaths []string      `yaml:"auto_approve_paths"`
-	SafeCommands     *SafeCommands `yaml:"safe_commands"`
+	FileBlocks       []string       `yaml:"file_blocks"`
+	AutoApprovePaths []string       `yaml:"auto_approve_paths"`
+	CommandBlocks    []CommandBlock `yaml:"command_blocks"`
+	SafeCommands     *SafeCommands  `yaml:"safe_commands"`
 }
 
 // wordToString extracts a plain string from a syntax.Word.
@@ -386,7 +399,38 @@ func LoadRules() (*Rules, error) {
 	if err := yaml.Unmarshal(data, &rules); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
 	}
+	if err := rules.CompileCommandBlocks(); err != nil {
+		return nil, fmt.Errorf("config %s: %w", configPath, err)
+	}
 	return &rules, nil
+}
+
+// CompileCommandBlocks compiles the command_blocks patterns. An invalid pattern
+// is a config error and fails loudly rather than silently not blocking.
+func (r *Rules) CompileCommandBlocks() error {
+	for i := range r.CommandBlocks {
+		block := &r.CommandBlocks[i]
+		compiled, err := regexp.Compile(block.Pattern)
+		if err != nil {
+			return fmt.Errorf("invalid command_blocks pattern %q: %w", block.Pattern, err)
+		}
+		block.compiled = compiled
+	}
+	return nil
+}
+
+// MatchCommandBlocks returns the matching command_blocks entry's reason, if
+// any. Exported separately from ShouldBlockCommand because the Claude hook
+// checks ONLY command_blocks for shell commands (file-exposure blocking is left
+// to Claude Code's own permission dialog there — see claude.go).
+func (r *Rules) MatchCommandBlocks(cmd string) (bool, string) {
+	for i := range r.CommandBlocks {
+		block := &r.CommandBlocks[i]
+		if block.compiled.MatchString(cmd) {
+			return true, block.Reason
+		}
+	}
+	return false, ""
 }
 
 func getConfigPath() string {
@@ -515,6 +559,10 @@ func (r *Rules) IsUnderAutoApprovePath(filePath string) bool {
 }
 
 func (r *Rules) ShouldBlockCommand(cmd string) (bool, string) {
+	if blocked, reason := r.MatchCommandBlocks(cmd); blocked {
+		return true, reason
+	}
+
 	cmdLower := strings.ToLower(cmd)
 
 	// Only block if the command both reads content AND references a blocked file

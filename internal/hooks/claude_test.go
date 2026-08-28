@@ -31,6 +31,56 @@ func decodeDecision(t *testing.T, raw string) (string, string) {
 	return resp.HookSpecificOutput.PermissionDecision, resp.HookSpecificOutput.PermissionDecisionReason
 }
 
+func TestPreToolUseCommandBlocks(t *testing.T) {
+	r := &rules.Rules{
+		CommandBlocks: []rules.CommandBlock{
+			{Pattern: `git(\s+-C\s+\S+)?\s+(switch|checkout)\b`, Reason: "anchor clones never switch branches"},
+		},
+		SafeCommands: &rules.SafeCommands{
+			// git is on the allow-list — the deny must still win over it
+			Prefixes: []string{"git"},
+		},
+	}
+	if err := r.CompileCommandBlocks(); err != nil {
+		t.Fatalf("CompileCommandBlocks: %v", err)
+	}
+	c := NewClaudeHookProcessor(r)
+
+	tests := []struct {
+		name         string
+		toolName     string
+		command      string
+		wantDecision string
+	}{
+		{"Bash git switch denied", "Bash", "git switch main", "deny"},
+		{"Bash git checkout denied despite allow-list prefix", "Bash", "git checkout main", "deny"},
+		{"PowerShell git checkout denied", "PowerShell", "git checkout main", "deny"},
+		{"Bash git status untouched (allow via safe prefix)", "Bash", "git status", "allow"},
+		{"PowerShell plain command passes through", "PowerShell", "Get-ChildItem", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := map[string]interface{}{
+				"hook_event_name": "PreToolUse",
+				"tool_name":       tt.toolName,
+				"tool_input":      map[string]interface{}{"command": tt.command},
+			}
+			out, err := c.Process(input)
+			if err != nil {
+				t.Fatalf("Process returned error: %v", err)
+			}
+			decision, reason := decodeDecision(t, out)
+			if decision != tt.wantDecision {
+				t.Fatalf("decision=%q reason=%q, want %q", decision, reason, tt.wantDecision)
+			}
+			if decision == "deny" && reason != "anchor clones never switch branches" {
+				t.Fatalf("deny reason = %q, want configured reason", reason)
+			}
+		})
+	}
+}
+
 func TestPreToolUseBlocksSensitivePaths(t *testing.T) {
 	c := testProcessor()
 

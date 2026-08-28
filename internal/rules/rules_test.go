@@ -100,6 +100,66 @@ func TestShouldBlockCommand(t *testing.T) {
 	}
 }
 
+func testRulesWithCommandBlocks(t *testing.T) *Rules {
+	r := &Rules{
+		CommandBlocks: []CommandBlock{
+			{
+				Pattern: `git(\s+-C\s+\S+)?\s+(switch|checkout)\b`,
+				Reason:  "anchor clones never switch branches",
+			},
+		},
+	}
+	if err := r.CompileCommandBlocks(); err != nil {
+		t.Fatalf("CompileCommandBlocks: %v", err)
+	}
+	return r
+}
+
+func TestMatchCommandBlocks(t *testing.T) {
+	r := testRulesWithCommandBlocks(t)
+
+	tests := []struct {
+		cmd     string
+		blocked bool
+		desc    string
+	}{
+		{"git switch main", true, "plain git switch"},
+		{"git checkout main", true, "plain git checkout"},
+		{"git checkout -b new-branch", true, "checkout -b"},
+		{"git switch -c new-branch", true, "switch -c"},
+		{"git checkout -- file.py", true, "checkout file-restore form also blocked (use git restore)"},
+		{"git -C ~/repos/erp checkout main", true, "-C form"},
+		{"cd ~/repos/erp && git checkout main", true, "inside compound command"},
+		{"ssh u5 'cd ~/app && git checkout main'", true, "inside ssh inner command"},
+
+		{"git restore file.py", false, "git restore allowed"},
+		{"git worktree add ../erp-worktrees/x -b x", false, "worktree add allowed"},
+		{"git status", false, "git status allowed"},
+		{"git checkoutfoo", false, "word boundary respected"},
+		{"echo 'git checkout is blocked'", true, "matches inside quotes too — regex is text-level, accepted false positive"},
+	}
+
+	for _, tt := range tests {
+		blocked, _ := r.MatchCommandBlocks(tt.cmd)
+		if blocked != tt.blocked {
+			t.Errorf("[%s] MatchCommandBlocks(%q) = %v, want %v", tt.desc, tt.cmd, blocked, tt.blocked)
+		}
+	}
+
+	// blocking reason surfaces through ShouldBlockCommand (opencode path)
+	blocked, reason := r.ShouldBlockCommand("git switch main")
+	if !blocked || reason != "anchor clones never switch branches" {
+		t.Errorf("ShouldBlockCommand(git switch) = %v, %q; want blocked with configured reason", blocked, reason)
+	}
+}
+
+func TestCompileCommandBlocksInvalidPattern(t *testing.T) {
+	r := &Rules{CommandBlocks: []CommandBlock{{Pattern: "([unclosed", Reason: "x"}}}
+	if err := r.CompileCommandBlocks(); err == nil {
+		t.Error("expected error for invalid regex pattern, got nil")
+	}
+}
+
 func TestContainsBlockedPattern(t *testing.T) {
 	r := testRules()
 

@@ -50,6 +50,17 @@ func (c *ClaudeHookProcessor) processPreToolUse(input map[string]interface{}) (s
 	toolName, _ := input["tool_name"].(string)
 	toolInputRaw, _ := input["tool_input"].(map[string]interface{})
 
+	// command_blocks deny wins over auto-approve. Checked for both shell tools
+	// (Bash, PowerShell) — unlike file-exposure blocking, which is left to
+	// Claude Code's own permission dialog (see shouldBlockTool).
+	if toolName == "Bash" || toolName == "PowerShell" {
+		if command, ok := toolInputRaw["command"].(string); ok {
+			if blocked, reason := c.rules.MatchCommandBlocks(command); blocked {
+				return denyDecision(reason)
+			}
+		}
+	}
+
 	// Check if this command should be auto-approved (e.g. safe SSH commands)
 	if toolName == "Bash" {
 		if command, ok := toolInputRaw["command"].(string); ok {
