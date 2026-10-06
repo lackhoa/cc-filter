@@ -176,10 +176,13 @@ search_blocks:
   - "internal_token"
   - "company_secret"
 
-# Add additional command patterns to block
+# Add additional command patterns to block (Go regexp on the raw command text).
+# Optional `unless`: a second regexp that exempts the command when it matches
+# (Go regexp has no lookaround, so this is how to say "except inside ssh").
 command_blocks:
-  - "cat.*company"
-  - "grep.*internal"
+  - pattern: 'git(\s+-C\s+\S+)?\s+(switch|checkout)\b'
+    unless: '^\s*ssh\s'
+    reason: "local anchor clones never switch branches"
 ```
 
 #### Example Project Config (`config.yaml`):

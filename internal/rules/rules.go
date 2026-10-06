@@ -33,11 +33,17 @@ type SafeCommands struct {
 // raw command string — so it also catches the command inside pipelines, ssh
 // invocations, and `cd x && ...` compounds). Reason is returned in the deny
 // message so the agent knows what to do instead.
+//
+// Unless is an optional second regexp: when it matches the same raw command
+// the block is skipped. Go regexp has no lookaround, so this is how a rule
+// expresses "...except inside `ssh host '...'`".
 type CommandBlock struct {
 	Pattern string `yaml:"pattern"`
+	Unless  string `yaml:"unless,omitempty"`
 	Reason  string `yaml:"reason"`
 
-	compiled *regexp.Regexp
+	compiled       *regexp.Regexp
+	unlessCompiled *regexp.Regexp
 }
 
 type Rules struct {
@@ -415,6 +421,13 @@ func (r *Rules) CompileCommandBlocks() error {
 			return fmt.Errorf("invalid command_blocks pattern %q: %w", block.Pattern, err)
 		}
 		block.compiled = compiled
+		if block.Unless != "" {
+			unlessCompiled, err := regexp.Compile(block.Unless)
+			if err != nil {
+				return fmt.Errorf("invalid command_blocks unless %q: %w", block.Unless, err)
+			}
+			block.unlessCompiled = unlessCompiled
+		}
 	}
 	return nil
 }
@@ -426,9 +439,13 @@ func (r *Rules) CompileCommandBlocks() error {
 func (r *Rules) MatchCommandBlocks(cmd string) (bool, string) {
 	for i := range r.CommandBlocks {
 		block := &r.CommandBlocks[i]
-		if block.compiled.MatchString(cmd) {
-			return true, block.Reason
+		if !block.compiled.MatchString(cmd) {
+			continue
 		}
+		if block.unlessCompiled != nil && block.unlessCompiled.MatchString(cmd) {
+			continue
+		}
+		return true, block.Reason
 	}
 	return false, ""
 }

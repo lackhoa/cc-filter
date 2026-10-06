@@ -105,6 +105,7 @@ func testRulesWithCommandBlocks(t *testing.T) *Rules {
 		CommandBlocks: []CommandBlock{
 			{
 				Pattern: `git(\s+-C\s+\S+)?\s+(switch|checkout)\b`,
+				Unless:  `^\s*ssh\s`,
 				Reason:  "anchor clones never switch branches",
 			},
 		},
@@ -130,7 +131,9 @@ func TestMatchCommandBlocks(t *testing.T) {
 		{"git checkout -- file.py", true, "checkout file-restore form also blocked (use git restore)"},
 		{"git -C ~/repos/erp checkout main", true, "-C form"},
 		{"cd ~/repos/erp && git checkout main", true, "inside compound command"},
-		{"ssh u5 'cd ~/app && git checkout main'", true, "inside ssh inner command"},
+		{"ssh u5 'cd ~/app && git checkout main'", false, "inside ssh inner command: exempted by unless (remote clones aren't anchors)"},
+		{"  ssh -o ConnectTimeout=8 u5 'git switch x'", false, "unless also matches with leading space + ssh flags"},
+		{"echo x && ssh u5 'git checkout main'", true, "ssh not at command start: unless doesn't match, still blocked"},
 
 		{"git restore file.py", false, "git restore allowed"},
 		{"git worktree add ../erp-worktrees/x -b x", false, "worktree add allowed"},
@@ -157,6 +160,10 @@ func TestCompileCommandBlocksInvalidPattern(t *testing.T) {
 	r := &Rules{CommandBlocks: []CommandBlock{{Pattern: "([unclosed", Reason: "x"}}}
 	if err := r.CompileCommandBlocks(); err == nil {
 		t.Error("expected error for invalid regex pattern, got nil")
+	}
+	r = &Rules{CommandBlocks: []CommandBlock{{Pattern: "ok", Unless: "([unclosed", Reason: "x"}}}
+	if err := r.CompileCommandBlocks(); err == nil {
+		t.Error("expected error for invalid unless regex, got nil")
 	}
 }
 
